@@ -130,6 +130,7 @@
       grant: (k) => c.requestPermission(k),
       finishPermissions: () => c.finishPermissions(),
       relaunch: () => c.relaunchApp(),
+      probeMic: () => c.probeMic(),
       recover: () => c.recoverFirst(),
       discardRecovery: () => c.discardFirstRecoverable(),
       reveal: () => c.reveal(),

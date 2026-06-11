@@ -100,7 +100,11 @@
       try {
         sources = await api.getSources();
       } catch (err) {
-        this.toast('Could not list screens and windows. Check the screen recording permission.');
+        // Expected before the screen permission is granted; the setup sheet
+        // already explains what to do, so don't toast over it.
+        if (this.get().permState.screen === 'ok') {
+          this.toast('Could not list screens and windows. Check the screen recording permission.');
+        }
         return;
       }
       const screens = sources
@@ -617,6 +621,16 @@
 
     _stopPermissionPolling() {
       if (this._permPoll) { clearInterval(this._permPoll); this._permPoll = null; }
+    }
+
+    // Open (and immediately close) a mic stream so the macOS permission
+    // prompt fires when the user toggles the mic on, not mid-countdown.
+    async probeMic() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((t) => t.stop());
+        await this.refreshDevices(); // labels become available after the grant
+      } catch { /* denied: recording proceeds without mic and the OS remembers */ }
     }
 
     async relaunchApp() {

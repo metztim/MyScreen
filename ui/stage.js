@@ -41,7 +41,8 @@
       const dx = ((ev.clientX - d.offX) / d.r.width) * 100;
       const dy = ((ev.clientY - d.offY) / d.r.height) * 100;
       const wPct = s.camW * 100;
-      const hPct = (s.camW * d.r.width * aspect) / d.r.height * 100;
+      // aspect is width/height, so bubble height = width / aspect
+      const hPct = (s.camW * d.r.width / aspect) / d.r.height * 100;
       set({
         camX: Math.max(2, Math.min(98 - wPct, d.startX + dx)),
         camY: Math.max(2, Math.min(98 - hPct, d.startY + dy)),
@@ -101,7 +102,7 @@
       const r = stageRef.current.getBoundingClientRect();
       const m = 4; // percent margin
       const wPct = s.camW * 100;
-      const hPct = (s.camW * r.width * (s.camShape === 'circle' ? 1 : 4 / 3)) / r.height * 100;
+      const hPct = (s.camW * r.width / (s.camShape === 'circle' ? 1 : 4 / 3)) / r.height * 100;
       const map = {
         tl: { camX: m, camY: m }, tr: { camX: 100 - wPct - m, camY: m },
         bl: { camX: m, camY: 100 - hPct - m }, br: { camX: 100 - wPct - m, camY: 100 - hPct - m },

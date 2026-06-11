@@ -134,7 +134,7 @@
         }),
         e(DevRow, {
           icon: s.micOn ? 'mic' : 'micoff', title: 'Microphone', sub: micSub,
-          on: s.micOn, onToggle: (v) => set({ micOn: v }),
+          on: s.micOn, onToggle: (v) => { set({ micOn: v }); if (v) actions.probeMic(); },
           open: pop === 'mic', onOpen: () => toggle('mic'), dir: 'down',
           popover: e(React.Fragment, null,
             e('div', { className: 'pop-title' }, 'Microphone'),
@@ -207,7 +207,7 @@
             : 'Connect Dropbox to enable',
           on: s.shareLink && s.dropbox.connected,
           onToggle: (v) => {
-            if (!s.dropbox.connected) return; // configure via the popover first
+            if (!s.dropbox.connected) { toggle('share'); return; } // open the Connect popover
             set({ shareLink: v });
           },
           open: pop === 'share', onOpen: () => toggle('share'), dir: 'up',

@@ -110,10 +110,12 @@
 
   function Permissions({ s, actions }) {
     const P = s.permState;
+    // Camera and mic first: those are one-click native prompts. Screen
+    // recording last, since it ends in the manual Settings step + restart.
     const rows = [
-      { key: 'screen', icon: 'monitor', t: 'Screen Recording', s: 'So MyScreen can capture your display.', act: 'Open Settings' },
       { key: 'cam', icon: 'webcam', t: 'Camera', s: 'For the optional camera overlay.', act: 'Enable' },
       { key: 'mic', icon: 'mic', t: 'Microphone', s: 'To record your voice.', act: 'Enable' },
+      { key: 'screen', icon: 'monitor', t: 'Screen Recording', s: 'So MyScreen can capture your display.', act: 'Open Settings' },
     ];
     const allOk = Object.values(P).every((v) => v === 'ok');
     // Only screen recording is a hard requirement; camera and mic prompt at
