@@ -1,0 +1,86 @@
+{
+  "name": "myscreen-v2",
+  "version": "1.0.0",
+  "description": "A clean, simple screen recorder built with Electron",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.js",
+    "build": "electron-builder",
+    "dist": "npm run build:native && APPLE_KEYCHAIN_PROFILE=myscreen-notarize electron-builder",
+    "build:native": "node-gyp rebuild"
+  },
+  "keywords": [
+    "screen-recorder",
+    "electron",
+    "video"
+  ],
+  "author": "Tim Metz",
+  "license": "MIT",
+  "dependencies": {
+    "ffmpeg-static": "^5.2.0",
+    "node-addon-api": "^8.8.0"
+  },
+  "devDependencies": {
+    "electron": "^37.2.6",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.timmetz.myscreen",
+    "productName": "MyScreen",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build-res"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "recording-engine.js",
+      "recording-writer.js",
+      "dropbox-share.js",
+      "settings-store.js",
+      "library-store.js",
+      "index.html",
+      "ui/**",
+      "vendor/**",
+      "assets/**"
+    ],
+    "mac": {
+      "category": "public.app-category.video",
+      "icon": "assets/icon.png",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build-res/entitlements.mac.plist",
+      "entitlementsInherit": "build-res/entitlements.mac.plist",
+      "extendInfo": {
+        "NSCameraUsageDescription": "MyScreen records your camera for the optional overlay and camera-only recordings.",
+        "NSMicrophoneUsageDescription": "MyScreen records your microphone so your voice is in the recording.",
+        "NSScreenCaptureUsageDescription": "MyScreen captures your screen to create recordings."
+      },
+      "notarize": true
+    },
+    "dmg": {
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**"
+    ],
+    "extraResources": [
+      {
+        "from": "build/Release/screen_prompt.node",
+        "to": "screen_prompt.node"
+      }
+    ]
+  }
+}

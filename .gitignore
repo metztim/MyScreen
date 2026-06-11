@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.app/
+out/
+
+# Recordings and temp artifacts
+*.webm
+*.mp4
+*_temp.webm
+/logs/
+
+# OS / editor
+.DS_Store
+*.log
+.vscode/
+*.code-workspace
+build/
+.claude/settings.local.json
