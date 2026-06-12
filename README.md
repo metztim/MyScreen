@@ -1,6 +1,6 @@
 # MyScreen
 
-A free, open-source screen recorder for macOS in the spirit of Loom: record your screen with an optional camera bubble, get an MP4 saved locally, and (if you want) a share link uploaded to your own Dropbox. No accounts, no subscriptions, your recordings never touch anyone else's server.
+A free, open-source alternative to Loom for macOS: record your screen with an optional camera bubble, get an MP4 saved locally, and (if you want) a share link uploaded to your own Dropbox. No accounts, no subscriptions, your recordings never touch anyone else's server.
 
 ![MyScreen](assets/icon.png)
 

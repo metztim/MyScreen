@@ -1,6 +1,10 @@
 # MyScreen
 
-Mac-only Electron screen recorder (Loom-style). Vanilla JS, **no build step** — files load via `<script>` tags. Don't introduce bundlers, JSX, or npm UI frameworks.
+Mac-only Electron screen recorder (a free, open-source alternative to Loom). Vanilla JS, **no build step** — files load via `<script>` tags. Don't introduce bundlers, JSX, or npm UI frameworks.
+
+## Positioning
+
+Canonical description: **"a free, open-source alternative to Loom"**. Use this phrasing in ALL user-facing copy: README, GitHub repo description, release notes, app store listings, social posts. Never "Loom clone" (implies copying, weaker positioning) and never "in the spirit of Loom" (superseded). "Alternative to Loom" is established nominative-fair-use convention (cf. Cap, 17k+ stars, same framing). Never use Loom's logo or put "Loom" in the app name.
 
 ## Architecture
 
