@@ -827,8 +827,6 @@ Read the session log section above, familiarize yourself with the context, and l
 - **Archive 6 stale reliability docs** - DONE: moved STABILITY_ANALYSIS.md, RELIABILITY_ASSESSMENT_2025-08-18.md, CRITICAL_FIXES_SUMMARY_2025-08-19.md, WEEK2/WEEK3 summaries, 3WEEK_SPRINT_COMPLETE_2025-08-19.md, and SESSION_SUMMARY-old-format.md to `docs/logs/` (git mv). docs/ now holds only SESSION_LOG.md + TESTING.md.
 - **Queue CLI fix: notion --from-file silent no-op** - SKIPPED (not selected). Workaround captured in Learnings above (prefer `--properties` / positional JSON).
 
-<!-- END_OF_SESSION_LOG -->
-
 ## Session Log: 2026-06-10
 
 **Project**: MyScreen (~/Developer/Projects/Personal/MyScreen)
@@ -933,6 +931,113 @@ Key points:
 Referenced paths:
 - ui/controller.js, dropbox-share.js, main.js (SETTINGS_DEFAULTS + dropbox IPC)
 - docs/SESSION_LOG.md, docs/TESTING.md
+
+Read the session log section above, familiarize yourself with the context, and let me know when ready to continue.
+
+---
+
+## Session Log: 2026-06-12
+
+**Project**: MyScreen (~/Developer/Projects/Personal/MyScreen)
+**Session ID**: ac6b8eec-826f-4701-8b19-a2f47eca0991
+**Duration**: 2026-06-11 evening through 2026-06-12 ~00:30 (one continuous session)
+**Type**: [feature] [config] [release]
+
+### Objectives
+- Embed Tim's Dropbox app key and live-test the share-link flow
+- Fix the screen-recording permission UX for end users (found: a macOS 26 rabbit hole)
+- Notarize the app for frictionless distribution
+- Open-source the repo + publish a public download
+
+### Summary
+Shipped MyScreen 1.0 publicly. Embedded the "MyScreen Recorder" Dropbox app key (PKCE public identifier) as a built-in default and live-tested connect → upload → share link end to end. Solved the macOS 26 screen-recording permission labyrinth: Apple killed the TCC prompt entirely ("Service kTCCServiceScreenCapture does not allow prompting" in tccd logs), so the app now triggers an in-process ScreenCaptureKit enumeration via a tiny N-API addon and walks users through the manual Settings toggle with a redesigned widescreen permission sheet (numbered steps + a stylized Settings-pane mock inside the Screen Recording card, plus a Restart MyScreen button). Created a Developer ID Application cert, wired notarization into electron-builder (keychain profile `myscreen-notarize`), and published: GPLv3, fresh single-commit public history at github.com/metztim/MyScreen, notarized DMG on the v1.0.0 release. Tim then did a full factory-fresh new-user test (quarantined DMG download → install → permissions → record → Dropbox connect) which surfaced six issues, all fixed and shipped the same night, including a real camera-bubble drag-clamp bug (aspect ratio inverted in the height math).
+
+### Files Changed
+- `main.js` - Dropbox key in SETTINGS_DEFAULTS + empty-key migration; permissions:request rewritten for macOS 26 (in-process SCK trigger + Settings deep-link); app:relaunch IPC; NSScreenCaptureUsageDescription
+- `native/screen-prompt.mm`, `binding.gyp` - NEW: N-API addon calling SCShareableContent in-process (the only thing that registers the app with TCC on macOS 26)
+- `dropbox-share.js` - upload to app-folder root (was redundant /MyScreen/ subfolder); comments updated
+- `ui/modals.js` - permission sheet redesign: widescreen, guide inside the Screen Recording card (steps left, Settings mock right), cam/mic rows first, Restart button
+- `ui/panel.js` - removed app-key paste-in field; share toggle opens Connect popover when unconnected; mic toggle probes the mic (prompt at toggle, not mid-countdown); Apps/MyScreen Recorder copy
+- `ui/controller.js` - probeMic, relaunchApp; suppressed "could not list screens" toast pre-grant; removed dropboxAppKey from state
+- `ui/app.js` - dropped dropboxAppKey from state/PERSISTED; relaunch + probeMic actions
+- `ui/stage.js` - FIX: bubble drag clamp + corner snap used aspect as height multiplier (height = width/aspect); rounded bubble couldn't reach frame bottom
+- `preload.js` - appRelaunch bridge
+- `package.json` - dropbox-share.js in files (packaged share would have crashed!); notarize + APPLE_KEYCHAIN_PROFILE; build:native (node-gyp); extraResources screen_prompt.node; buildResources moved to build-res/ (node-gyp owns build/); node-addon-api dep
+- `build-res/entitlements.mac.plist` - moved from build/ (node-gyp clean deleted it once)
+- `README.md` - rewritten for the public repo (download, features, privacy, dev quickstart, GPL)
+- `LICENSE` - NEW: GPLv3
+- `CLAUDE.md` - Dropbox gotcha updated (key now built in)
+- `.gitignore` - build/ (node-gyp artifacts), .claude/settings.local.json
+
+### Referenced Materials
+- tccd unified log (`/usr/bin/log show --predicate 'process == "tccd"'`) - the smoking gun for macOS 26 behavior
+- Apple Developer Forums thread 807898 (plain executables missing from Screen Recording UI)
+- dropbox.com/developers - "MyScreen Recorder" app (App folder access, scoped, development status 500-user cap)
+- developer.apple.com - Developer ID Application cert creation (G2 Sub-CA, team 4UKU37ST4J Mengtian)
+- https://github.com/metztim/MyScreen - the public repo + v1.0.0 release
+
+### Tracked in Notion
+- **"MyScreen"** (Personal Projects, `24cedc77-7df2-8028-9ed0-e867a96a6f5e`, personal) - session anchor
+- **"Create Dropbox app key for MyScreen share links + live-test"** (Personal Tasks, `37cedc77-7df2-8157-8885-f5435843e882`, personal) - marked Done
+- **"MyScreen distribution: Developer ID cert + notarization, verify packaged app"** (Personal Tasks, `37cedc77-7df2-8148-a2e7-e373e6836462`, personal) - marked Done
+- **"MyScreen: mic level indicator while recording"** (Personal Tasks, `37cedc77-7df2-8156-885d-c4a526022102`, personal) - NEW backlog
+- **"MyScreen: auto-updater via GitHub Releases"** (Personal Tasks, `37cedc77-7df2-8145-a450-d55e50b50c0e`, personal) - NEW backlog
+- **"MyScreen: recordings library - Show in Finder, Dropbox status + copy link, retroactive upload"** (Personal Tasks, `37cedc77-7df2-8199-9b0b-fcafc3b5378a`, personal) - NEW backlog
+- **Continuation prompt posted to:** "MyScreen" (`24cedc77-7df2-8028-9ed0-e867a96a6f5e`, personal) - comment id `37dedc77-7df2-8150-8b0a-001d3a9cdf68`
+
+### Technical Notes
+- **macOS 26 screen recording permission model** (verified empirically via tccd logs, macOS 26.5.1): there is NO prompt, ever. `getMediaAccessStatus('screen')` never reports not-determined (denied == never-asked). `CGRequestScreenCaptureAccess()` is a silent no-op. Chromium preflights capture so Electron never reaches the TCC layer on its own. In-process `SCShareableContent` enumeration is the correct trigger BUT tccd answers "does not allow prompting; returning denied" - the user must manually toggle/+ the app in System Settings. After the toggle: restart required, then a separate "bypass the system private window picker" Allow dialog on first actual capture. Spawned plain-executable helpers get correct responsible-process attribution but still no prompt and no (visible) Settings entry - the call must come from the app process.
+- **TCC attribution**: apps launched from a terminal inherit the terminal's TCC identity (camera indicator showed "MyGhostty"); test permission flows only via LaunchServices (`open`) or real installs. Re-signing with a different cert (Apple Development → Developer ID) wipes existing TCC grants; same-cert rebuilds keep them.
+- **Notarization recipe**: Developer ID Application cert (G2 Sub-CA) + `xcrun notarytool store-credentials myscreen-notarize` + electron-builder `mac.notarize: true` + `APPLE_KEYCHAIN_PROFILE=myscreen-notarize`. electron-builder staples the .app (DMG itself carries no ticket - that's fine). Verify: `spctl -a -vv -t install` → "Notarized Developer ID", `stapler validate`.
+- **node-gyp owns `build/`** and deletes its contents on rebuild - electron-builder buildResources moved to `build-res/`.
+- **electron-builder explicit `files` list does NOT auto-include new root JS files** - dropbox-share.js was missing and the packaged share feature would have crashed on require.
+- **zsh shadows `/usr/bin/log`** (builtin) - use the full path for unified-log queries.
+- **Dropbox app-folder uploads**: dest `/` is already `Apps/MyScreen Recorder/`; the dev/packaged apps share userData (`~/Library/Application Support/myscreen-v2`, named after package.json `name`).
+- **Git branch layout**: `main` = public lineage (fresh single initial commit + subsequent work, pushed to github.com/metztim/MyScreen); `master` + `archive/pre-public` = full private history, local only, never push. Work on `main` from now on.
+
+### Next Actions
+- [ ] Tim: re-test the three behavior fixes in the re-downloaded DMG (mic prompt at toggle, share toggle opens Connect, bubble drags to bottom)
+- [ ] Backlog (Notion tasks created): mic level indicator while recording; auto-updater via GitHub Releases; recordings library (Show in Finder, Dropbox status + copy link, retroactive upload)
+- [ ] Consider Dropbox production approval if MyScreen spreads (development status caps at 500 connected users)
+- [ ] Consider x64/universal build if non-Apple-Silicon users ask (current DMG is arm64 only)
+
+### Metrics
+- 2 commits on public main (initial release + first-run polish), 11 commits total incl. private master
+- Public tree: 49 files; tests 12/12 green throughout
+- Release: v1.0.0, notarized DMG, replaced once with same-night fixes
+
+### Learnings & Improvement Opportunities
+
+**CLAUDE.md updates:**
+- Project CLAUDE.md should document: macOS 26 permission model, notarization recipe, branch layout (main public / master private), node-gyp vs build-res split
+
+**Workflow improvements:**
+- notion-cli: friendly property conversion ("Task name": "string") failed with "Invalid property value" for both positional and --from-file payloads this session; raw Notion property objects worked. Either a regression or a doc gap - needs a look.
+
+### Notion Sync (save-session Step 10)
+- Appended "Public release" section (repo + release links) to the MyScreen project page body
+- Task creates/closes were handled in-session (see Tracked in Notion)
+
+### Improvements & fixes (save-session Step 11)
+- **Update project CLAUDE.md** - DONE NOW: added "Git & distribution" (branch layout, release/notarize flow, node-gyp vs build-res) and "macOS 26 screen-recording permission model" (no-prompt reality, working flow, TCC testing recipe) sections
+- **notion-cli property conversion bug** - DUPLICATE: matches existing open task "notion-cli: mixed shorthand+structured property payload silently fails all shorthand fields" (`36dedc77-7df2-8125-ad0f-c8c2d3feb0e1`); appended re-surfaced comment `37dedc77-7df2-81a1-aed1-001d17c570c9` with today's repro detail (pure-shorthand --from-file also failed)
+
+### Continuation Prompt
+Project: MyScreen
+Session log: docs/SESSION_LOG.md
+Section: "## Session Log: 2026-06-12" ([feature][release] entry)
+
+Context: MyScreen 1.0 is public: github.com/metztim/MyScreen (GPLv3), notarized DMG on the v1.0.0 release, Dropbox share links live with Tim's embedded app key. The macOS 26 permission flow is a guided manual Settings toggle (no prompt exists on macOS 15+; see Technical Notes).
+
+Key points:
+- Work on git branch `main` (public, pushed); `master`/`archive/pre-public` are private local history - never push them
+- Release flow: npm run dist (signs + notarizes via keychain profile `myscreen-notarize`), then gh release upload --clobber
+- Backlog in Notion (Personal Tasks, MyScreen project): mic level indicator while recording, auto-updater via GitHub Releases, recordings library enhancements (Show in Finder, Dropbox status + copy link, retroactive upload)
+- Tim still owes a quick re-test of the three first-run behavior fixes in the shipped DMG
+
+Referenced paths:
+- ui/ (controller.js, panel.js, modals.js, stage.js), main.js, native/screen-prompt.mm
+- docs/SESSION_LOG.md, CLAUDE.md, package.json ("build" block)
 
 Read the session log section above, familiarize yourself with the context, and let me know when ready to continue.
 

@@ -27,6 +27,22 @@ Mac-only Electron screen recorder (Loom-style). Vanilla JS, **no build step** �
   - Override `navigator.mediaDevices.getUserMedia` with canvas `captureStream()` (+ AudioContext oscillator for mic) to fake capture
   - Drives the real UI through record → save → recovery; verifies everything except TCC-gated capture. Examples in session log 2026-06-10/11.
 
+## Git & distribution
+
+- **Branches:** `main` = public lineage, pushed to github.com/metztim/MyScreen (GPL-3.0). `master` + `archive/pre-public` = full private pre-release history, local only, NEVER push. Work on `main`.
+- **Release flow:** `npm run dist` compiles the native addon (node-gyp), builds, signs (Developer ID: Mengtian, team 4UKU37ST4J), and notarizes via keychain profile `myscreen-notarize` (`APPLE_KEYCHAIN_PROFILE`). Then `gh release upload v<X> dist/MyScreen-<X>-arm64.dmg --clobber`. Verify: `spctl -a -vv -t install dist/mac-arm64/MyScreen.app` → "Notarized Developer ID".
+- **node-gyp owns `build/`** (gitignored, wiped on rebuild); electron-builder resources live in `build-res/` (entitlements). The addon ships via `extraResources` as `Resources/screen_prompt.node`.
+- New root JS files must be added to the electron-builder `files` list manually - it does not glob the root.
+
+## macOS 26 screen-recording permission model
+
+There is NO system prompt for screen recording on macOS 15+ (tccd: "Service kTCCServiceScreenCapture does not allow prompting"). `getMediaAccessStatus('screen')` never returns not-determined; `CGRequestScreenCaptureAccess()` is a no-op; Chromium preflights capture and never reaches TCC. The flow that works:
+1. Enable in the permissions sheet calls `native/screen-prompt.mm` (in-process SCShareableContent - prompts on macOS 13/14, registers intent on 15+) AND opens the Settings pane.
+2. The user manually toggles/+ MyScreen in Screen & System Audio Recording (the sheet's guided steps + Settings mock cover this), then restarts (sheet has a Restart button; macOS also offers Quit & Reopen).
+3. First real capture then shows a separate "bypass the system private window picker" Allow dialog.
+
+Testing TCC: launch via `open` or a real install - terminal-spawned apps inherit the terminal's TCC identity. `tccutil reset All com.timmetz.myscreen` + wiping `~/Library/Application Support/myscreen-v2` simulates a new user. Re-signing with a different cert wipes grants; same-cert rebuilds keep them. Debug via `/usr/bin/log show --predicate 'process == "tccd"'` (full path - zsh shadows `log`).
+
 ## Gotchas
 
 - **TCC**: dev runs use the Electron binary's identity (shows as "Electron" in System Settings); the packaged app has its own ("MyScreen") and needs permissions granted separately. Screen Recording requires app restart after granting.
