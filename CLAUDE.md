@@ -30,6 +30,7 @@ Canonical description: **"a free, open-source alternative to Loom"**. Use this p
   - `window.__ms` = `{ set, get, controller }` state hook in `ui/app.js`
   - Override `navigator.mediaDevices.getUserMedia` with canvas `captureStream()` (+ AudioContext oscillator for mic) to fake capture
   - Drives the real UI through record → save → recovery; verifies everything except TCC-gated capture. Examples in session log 2026-06-10/11.
+- **Marketing screenshots**: `test/marketing-screenshots.js` — same CDP harness, captures 2x PNGs of ready/recording/saved states with fake content streams. Back up `~/Library/Application Support/myscreen-v2/settings.json` first (dev shares userData with the packaged app), restore after. Usage header in the script.
 
 ## Git & distribution
 
