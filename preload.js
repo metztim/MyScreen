@@ -13,7 +13,6 @@ function replaceListener(channel, callback) {
 
 contextBridge.exposeInMainWorld('electronAPI', {
   getSources: () => ipcRenderer.invoke('get-sources'),
-  showSaveDialog: (options) => ipcRenderer.invoke('show-save-dialog', options),
 
   // Settings.
   getSettings: () => ipcRenderer.invoke('settings:get'),
@@ -25,6 +24,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Recordings library.
   libraryList: () => ipcRenderer.invoke('library:list'),
   libraryOpen: (filePath) => ipcRenderer.invoke('library:open', filePath),
+  libraryMeta: (filePath) => ipcRenderer.invoke('library:meta-for', filePath),
   onLibraryMeta: (callback) => replaceListener('library:meta', (event, meta) => callback(meta)),
 
   // Permissions preflight.

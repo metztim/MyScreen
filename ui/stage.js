@@ -1,6 +1,5 @@
 /* MyScreen — preview stage + camera overlay + overlay editor + countdown.
-   Renders s.previewStream / s.camStream when present (wired in Phase 2);
-   falls back to placeholders until then. */
+   Renders s.previewStream / s.camStream when present; placeholders otherwise. */
 (function () {
   const e = React.createElement;
   const { useRef, useState, useEffect } = React;
@@ -216,6 +215,10 @@
             e('span', { style: { fontFamily: 'var(--mono)', opacity: .85, marginLeft: 4 } }, actions.fmt(s.elapsed)),
           )
         : null,
+      // the microphone was wanted but the recording has no live audio track
+      (s.flow === 'recording' || s.flow === 'paused') && s.micOn && !s.recHasAudio
+        ? e('div', { className: 'stage-tag warn', role: 'alert' }, e(Icon, { name: 'micoff', size: 14 }), e('span', null, 'No sound is being recorded'))
+        : null,
       // camera overlay, positioned inside the video content box
       camActive && contentRect
         ? e('div', {
@@ -239,10 +242,10 @@
             e('span', { className: 'fled', style: s.flow === 'paused' ? { background: '#ef7f21', animation: 'none' } : {} }),
             e('span', { className: 'ftimer' }, actions.fmt(s.elapsed)),
             e('div', { className: 'fsep' }),
-            e('button', { className: 'fbtn', onClick: actions.togglePause, title: s.flow === 'paused' ? 'Resume' : 'Pause' },
+            e('button', { className: 'fbtn', onClick: actions.togglePause, title: s.flow === 'paused' ? 'Resume' : 'Pause', 'aria-label': s.flow === 'paused' ? 'Resume recording' : 'Pause recording' },
               e(Icon, { name: s.flow === 'paused' ? 'play' : 'pause', size: 18, fill: s.flow === 'paused' ? 'currentColor' : 'none' })),
-            e('button', { className: 'fbtn stop', onClick: actions.stop, title: 'Stop & save' }, e('div', { style: { width: 13, height: 13, borderRadius: 3, background: '#fff' } })),
-            e('button', { className: 'fbtn danger', onClick: actions.discardRecording, title: 'Discard' }, e(Icon, { name: 'trash', size: 17 })),
+            e('button', { className: 'fbtn stop', onClick: actions.stop, title: 'Stop & save', 'aria-label': 'Stop and save' }, e('div', { style: { width: 13, height: 13, borderRadius: 3, background: '#fff' } })),
+            e('button', { className: 'fbtn danger', onClick: actions.discardRecording, title: 'Discard', 'aria-label': 'Discard recording' }, e(Icon, { name: 'trash', size: 17 })),
           )
         : null,
     );

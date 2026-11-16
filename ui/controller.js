@@ -1,14 +1,8 @@
 /* MyScreen — RecorderController: the bridge between the React UI and the
    RecordingEngine + electronAPI. The engine stays the source of truth for
    recording state; React owns view/config state. The controller maps engine
-   events to the UI's flow vocabulary and owns all stream lifecycles.
-
-   Phase 2 behavior notes:
-   - Camera overlay during recording uses the engine's existing paths: canvas
-     compositing (fixed top-right) for window capture, the floating OS camera
-     window for full-screen. Preview-position editing arrives with the
-     parameterized compositing (Phase 4+).
-   - Saving is automatic: generated filename into the configured folder. */
+   events to the UI's flow vocabulary and owns all preview stream lifecycles.
+   Saving is automatic: generated filename into the configured folder. */
 (function () {
   const api = window.electronAPI;
 
@@ -20,6 +14,14 @@
   }
 
   function mapQuality(q) { return q === 'small' ? 'slow' : (q || 'balanced'); }
+
+  // Errors that crossed the IPC bridge arrive wrapped ("Error invoking remote
+  // method 'x': Error: ..."). Show only the part a person can use.
+  function reason(err) {
+    return String((err && err.message) || err || 'Unknown error')
+      .replace(/^Error invoking remote method '[^']+':\s*/, '')
+      .replace(/^Error:\s*/, '');
+  }
 
   class RecorderController {
     constructor() {
@@ -33,6 +35,8 @@
       this._countdownTimer = null;
       this._conversionStart = null;
       this._quitting = false;
+      this._previewGen = 0; // bumped per syncPreview call; a stale call drops its stream
+      this._camGen = 0;
       this._attachEngine();
       this._attachMainEvents();
     }
@@ -45,7 +49,8 @@
 
     set(patch) { if (this._set) this._set(patch); }
     get() { return this._get ? this._get() : {}; }
-    toast(msg) { if (this._toast) this._toast(msg); }
+    // kind: 'info' (brief), 'warn' (longer), 'error' (stays until dismissed)
+    toast(msg, kind = 'info') { if (this._toast) this._toast(msg, kind); }
 
     // --- startup -------------------------------------------------------------
 
@@ -64,10 +69,15 @@
           shareLink: settings.shareLink,
         });
       } catch (err) {
-        this.toast('Could not load settings; using defaults.');
+        this.toast('Could not load your settings. Using the defaults for now.', 'warn');
       }
 
       await this.refreshDropboxStatus();
+
+      // Keep the device menus current when a mic or camera is plugged in or out.
+      if (navigator.mediaDevices.addEventListener) {
+        navigator.mediaDevices.addEventListener('devicechange', () => this.refreshDevices());
+      }
 
       await this.refreshDevices();
       await this.refreshSources({ selectDefaults: true });
@@ -91,7 +101,7 @@
           .map((d) => ({ deviceId: d.deviceId, label: d.label || `Camera ${d.deviceId.slice(0, 8)}` }));
         this.set({ mics, cams });
       } catch (err) {
-        this.toast('Failed to detect audio/video devices.');
+        this.toast('Could not list cameras and microphones.', 'warn');
       }
     }
 
@@ -103,7 +113,7 @@
         // Expected before the screen permission is granted; the setup sheet
         // already explains what to do, so don't toast over it.
         if (this.get().permState.screen === 'ok') {
-          this.toast('Could not list screens and windows. Check the screen recording permission.');
+          this.toast('Could not list screens and windows. Check the Screen Recording permission in System Settings.', 'warn');
         }
         return;
       }
@@ -131,11 +141,14 @@
     async syncPreview() {
       const s = this.get();
       if (this._engineOwnsStage()) return;
+      // Calls overlap when the source changes quickly. Each one takes a
+      // ticket; a call that is no longer the latest releases what it opened.
+      const gen = ++this._previewGen;
 
       if (s.mode === 'camera') {
         this._stopPreview();
-        await this._ensureCamStream();
-        return;
+        this.set({ previewStream: null });
+        return; // syncCamera supplies the camera stage
       }
 
       const source = s.mode === 'screen' ? s.screenSource : s.windowSource;
@@ -157,12 +170,17 @@
             video: { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: source.id } },
           });
         }
+        if (gen !== this._previewGen || this._engineOwnsStage()) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
         this._previewStream = stream;
         this._previewSourceId = source.id;
         this.set({ previewStream: stream });
       } catch (err) {
+        if (gen !== this._previewGen) return;
         this.set({ previewStream: null });
-        this.toast('Could not preview that source. Check the screen recording permission.');
+        this.toast('Could not preview that source. It may have closed, or Screen Recording is not allowed.', 'warn');
       }
     }
 
@@ -170,6 +188,7 @@
     async syncCamera() {
       const s = this.get();
       if (this._engineOwnsStage()) return;
+      const gen = ++this._camGen;
       const wantCam = s.mode === 'camera' || s.camOn;
 
       if (!wantCam) { this._stopCam(); return; }
@@ -184,14 +203,19 @@
           },
           audio: false,
         });
+        if (gen !== this._camGen || this._engineOwnsStage()) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
         this._camStream = stream;
         this._camDeviceId = s.camDeviceId || '';
         this.set({ camStream: stream });
         // Labels become available after the first permission grant.
         if (!(this.get().cams || []).some((c) => c.label && !c.label.startsWith('Camera '))) this.refreshDevices();
       } catch (err) {
+        if (gen !== this._camGen) return;
         this.set({ camStream: null, camOn: s.mode === 'camera' ? s.camOn : false });
-        this.toast('Unable to access the camera. Check it is connected and permitted.');
+        this.toast('Could not use the camera. Check that it is connected and allowed in System Settings.', 'warn');
       }
     }
 
@@ -213,7 +237,7 @@
     }
 
     _engineOwnsStage() {
-      return ['recording', 'stopping'].includes(this.engine.state);
+      return ['acquiring', 'recording', 'paused', 'stopping'].includes(this.engine.state);
     }
 
     async _restorePreviews() {
@@ -271,10 +295,15 @@
         : false;
       if (cameraOverlay) {
         // The engine acquires its own camera for compositing; release the bubble's.
+        this._camGen++;
         this._stopCam();
         await new Promise((r) => setTimeout(r, 150));
       }
 
+      // A failed start is reported through the engine's 'error' event, which
+      // already restores the UI. Only handle here what the event did not.
+      let reported = false;
+      const off = this.engine.on('error', () => { reported = true; });
       try {
         await this.engine.start({
           source,
@@ -287,10 +316,12 @@
           suggestedName: `${generateName()}.webm`,
         });
       } catch (err) {
-        this.set({ flow: 'ready' });
-        this.toast(`Could not start recording: ${err.message}`);
-        this.engine.reset();
-        await this._restorePreviews();
+        if (!reported) {
+          this.set({ flow: 'ready' });
+          this.toast(`Could not start recording: ${reason(err)}`, 'error');
+        }
+      } finally {
+        off();
       }
     }
 
@@ -314,11 +345,12 @@
     // --- engine events -----------------------------------------------------------
 
     _attachEngine() {
-      this.engine.on('started', () => {
+      this.engine.on('started', ({ hasAudio }) => {
         // The engine owns the capture now; show its stream and drop the preview
         // so the source is only captured once.
+        this._previewGen++;
         this._stopPreview();
-        this.set({ flow: 'recording', elapsed: 0, previewStream: this.engine.stream, camStream: null });
+        this.set({ flow: 'recording', elapsed: 0, previewStream: this.engine.stream, camStream: null, recHasAudio: !!hasAudio });
         this._startTimer();
       });
       this.engine.on('state', ({ to, from }) => {
@@ -326,14 +358,29 @@
         else if (to === 'paused') this.set({ flow: 'paused' });
         else if (to === 'recording' && from === 'paused') this.set({ flow: 'recording' });
       });
-      this.engine.on('finalized', (info) => { this._onFinalized(info); });
-      this.engine.on('warning', ({ message }) => this.toast(message));
-      this.engine.on('error', async ({ error }) => {
+      this.engine.on('finalized', (info) => { this._stopTimer(); this._onFinalized(info); });
+      this.engine.on('warning', ({ code, message }) => {
+        if (code === 'mic-ended' || code === 'mic-unavailable') this.set({ recHasAudio: false });
+        // A recording that silently lost its sound or stopped early is the
+        // kind of thing the user must not miss: keep it on screen.
+        const sticky = ['mic-ended', 'mic-unavailable', 'source-ended', 'camera-ended'].includes(code);
+        this.toast(message, sticky ? 'error' : 'warn');
+      });
+      this.engine.on('error', async ({ error, phase, released }) => {
         this._stopTimer();
         this.engine.reset();
         this.set({ flow: 'ready', elapsed: 0, previewStream: null });
-        this.toast(`Recording error: ${error.message}`);
+        if (phase === 'start') {
+          this.toast(`Could not start recording: ${reason(error)}`, 'error');
+        } else {
+          this.toast(`The recording stopped because of an error: ${reason(error)}`, 'error');
+        }
         await this._restorePreviews();
+        if (phase !== 'start') {
+          // Whatever was captured before the error is on disk; offer it.
+          try { await released; } catch { /* nothing to offer */ }
+          await this.checkRecovery();
+        }
       });
     }
 
@@ -346,8 +393,9 @@
       try {
         folder = await api.ensureSaveFolder();
       } catch (err) {
-        this.toast(`Cannot access the save folder: ${err.message}`);
         this.set({ flow: 'ready' });
+        this.toast(`The save folder is not available (${reason(err)}). Your recording is safe: choose another folder under Output, then recover it.`, 'error');
+        await this.checkRecovery();
         return;
       }
 
@@ -367,14 +415,35 @@
           quality: mapQuality(s.quality),
           durationSeconds: durationMs ? durationMs / 1000 : 0,
         });
-        const savedPath = result.filePath || destPath;
-        this.set({ flow: 'saved', saveProgress: 100, lastFileName: savedPath.split('/').pop(), lastFilePath: savedPath });
-        if (result.conversionFailed) this.toast('MP4 conversion failed; saved as WebM instead.');
-        this.maybeShare(savedPath);
+        this._showSaved(result.filePath || destPath);
+        if (result.conversionFailed) this.toast('Converting to MP4 failed, so the recording was saved as WebM instead.', 'warn');
       } catch (err) {
+        // The raw recording is still in the in-progress folder; recovery
+        // offers it again right away.
         this.set({ flow: 'ready' });
-        this.toast(`Save failed: ${err.message}`);
+        this.toast(`Saving failed: ${reason(err)} Your recording is safe and can be recovered.`, 'error');
+        await this.checkRecovery();
       }
+    }
+
+    _showSaved(savedPath) {
+      this.set({
+        flow: 'saved', saveProgress: 100,
+        lastFileName: savedPath.split('/').pop(), lastFilePath: savedPath, lastThumbnail: null,
+      });
+      this.maybeShare(savedPath);
+      // Real thumbnail (and exact duration) for the Saved sheet.
+      api.libraryMeta(savedPath).then((meta) => {
+        if (!meta || this.get().lastFilePath !== savedPath) return;
+        const patch = { lastThumbnail: meta.thumbnailDataUrl || null };
+        if (meta.durationSeconds != null) patch.lastDuration = Math.round(meta.durationSeconds);
+        this.set(patch);
+      }).catch(() => { /* the placeholder stays */ });
+    }
+
+    openLastRecording() {
+      const p = this.get().lastFilePath;
+      if (p) api.libraryOpen(p);
     }
 
     // --- Dropbox link sharing -------------------------------------------------------
@@ -395,7 +464,7 @@
         this.set({ shareLink: true });
         this.toast(`Dropbox connected as ${account}.`);
       } catch (err) {
-        this.toast(`Dropbox connection failed: ${err.message}`);
+        this.toast(`Dropbox connection failed: ${reason(err)}`, 'error');
       }
     }
 
@@ -403,7 +472,7 @@
       try {
         this.set({ dropbox: await api.dropboxDisconnect(), shareLink: false });
       } catch (err) {
-        this.toast(`Could not disconnect: ${err.message}`);
+        this.toast(`Could not disconnect: ${reason(err)}`, 'warn');
       }
     }
 
@@ -426,7 +495,7 @@
         catch { this.toast('Dropbox link is ready.'); }
       } catch (err) {
         this.set({ shareState: 'error' });
-        this.toast(`Dropbox upload failed: ${err.message}`);
+        this.toast(`Dropbox upload failed: ${reason(err)}`, 'warn');
       }
     }
 
@@ -439,7 +508,7 @@
       const url = this.get().shareUrl;
       if (!url) return false;
       try { await navigator.clipboard.writeText(url); return true; }
-      catch { this.toast('Could not copy the link.'); return false; }
+      catch { this.toast('Could not copy the link.', 'warn'); return false; }
     }
 
     // --- timer ---------------------------------------------------------------------
@@ -531,7 +600,7 @@
       try {
         folder = await api.ensureSaveFolder();
       } catch (err) {
-        this.toast(`Cannot access the save folder: ${err.message}`);
+        this.toast(`The save folder is not available (${reason(err)}). Choose another folder under Output, then try again.`, 'error');
         return;
       }
 
@@ -547,13 +616,12 @@
 
       try {
         const result = await api.recoverRecording({ recordingId: item.recordingId, destPath, convert, quality: mapQuality(s.quality) });
-        const savedPath = result.filePath || destPath;
-        this.set({ flow: 'saved', saveProgress: 100, lastFileName: savedPath.split('/').pop(), lastFilePath: savedPath });
-        if (result.conversionFailed) this.toast('MP4 conversion failed; recovered as WebM instead.');
-        this.maybeShare(savedPath);
+        this._showSaved(result.filePath || destPath);
+        if (result.conversionFailed) this.toast('Converting to MP4 failed, so the recording was recovered as WebM instead.', 'warn');
       } catch (err) {
-        this.set({ flow: 'ready' });
-        this.toast(`Recovery failed: ${err.message}`);
+        // Put the item back so it can be retried or discarded.
+        this.set({ flow: 'recovery', recoverable: [item, ...rest] });
+        this.toast(`Recovery failed: ${reason(err)}`, 'error');
       }
     }
 
@@ -575,7 +643,8 @@
 
     // --- permissions preflight ------------------------------------------------------
 
-    _mapPerm(v) { return v === 'granted' ? 'ok' : 'todo'; }
+    // 'denied' means macOS will not prompt again; the fix is in System Settings.
+    _mapPerm(v) { return v === 'granted' ? 'ok' : (v === 'denied' || v === 'restricted') ? 'denied' : 'todo'; }
 
     // Returns true when everything needed is already granted.
     async checkPermissions() {
@@ -652,7 +721,7 @@
       try {
         entries = await api.libraryList();
       } catch (err) {
-        this.toast(`Could not read the recordings folder: ${err.message}`);
+        this.toast(`Could not read the recordings folder: ${reason(err)}`, 'warn');
         return;
       }
       this.set({ recordings: entries.map((en) => this._toLibraryItem(en)) });
@@ -689,7 +758,7 @@
         const result = await api.chooseFolder();
         if (result) this.set({ folder: result.folderDisplay, folderAbs: result.folder });
       } catch (err) {
-        this.toast(`Could not change the folder: ${err.message}`);
+        this.toast(`Could not change the folder: ${reason(err)}`, 'warn');
       }
     }
 

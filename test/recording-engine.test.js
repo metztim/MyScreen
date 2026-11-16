@@ -16,8 +16,12 @@ function fakeBlob(buf) {
 }
 
 class FakeTrack {
-  constructor(kind) { this.kind = kind; this.stopped = false; }
-  stop() { this.stopped = true; }
+  constructor(kind) { this.kind = kind; this.stopped = false; this.readyState = 'live'; this._ended = new Set(); }
+  stop() { this.stopped = true; this.readyState = 'ended'; } // like the real one: no 'ended' event
+  addEventListener(type, fn) { if (type === 'ended') this._ended.add(fn); }
+  removeEventListener(type, fn) { if (type === 'ended') this._ended.delete(fn); }
+  // The device or window went away on its own.
+  end() { this.readyState = 'ended'; for (const fn of [...this._ended]) fn(); }
 }
 
 class FakeMediaStream {
@@ -186,9 +190,15 @@ test('a write failure transitions to error and emits error', async () => {
   await engine.start({ source: { type: 'screen', id: 's' }, recordingId: 'engine-err' });
   FakeMediaRecorder.instances.at(-1).emit(Buffer.from('bytes'));
 
-  const { error } = await errored;
+  const { error, phase, released } = await errored;
   assert.match(error.message, /disk full/);
+  assert.strictEqual(phase, 'recording');
   assert.strictEqual(engine.state, 'error');
+
+  // The file is closed in the main process, so it is no longer held open as
+  // "still recording" and recovery can see it.
+  await released;
+  assert.strictEqual(writer.active.size, 0);
 
   engine.reset();
   assert.strictEqual(engine.state, 'idle');
@@ -248,6 +258,102 @@ test('pause/resume: transitions are guarded and paused time is excluded from dur
   const result = await finalized;
   assert.strictEqual(result.durationMs, 6000, 'finalized duration must exclude all paused spans');
   assert.strictEqual(engine.state, 'idle');
+
+  await fsp.rm(baseDir, { recursive: true, force: true });
+});
+
+// A mediaDevices fake that remembers every stream it hands out.
+function trackingMediaDevices() {
+  const streams = [];
+  return {
+    streams,
+    getUserMedia: async (constraints) => {
+      const stream = await fakeMediaDevices.getUserMedia(constraints);
+      streams.push(stream);
+      return stream;
+    },
+  };
+}
+
+test('a failed start releases every capture it had already acquired', async () => {
+  const baseDir = await freshBaseDir();
+  const writer = new RecordingWriter({ baseDir });
+  const mediaDevices = trackingMediaDevices();
+  class ThrowingRecorder extends FakeMediaRecorder {
+    constructor() { throw new Error('codec not supported'); }
+  }
+  const engine = new RecordingEngine({
+    api: makeApi(writer), MediaRecorder: ThrowingRecorder, MediaStream: FakeMediaStream, mediaDevices, now: () => 1,
+  });
+
+  const errors = [];
+  engine.on('error', (e) => errors.push(e));
+  await assert.rejects(
+    () => engine.start({ source: { type: 'screen', id: 's' }, mic: true, recordingId: 'engine-leak' }),
+    /codec not supported/
+  );
+
+  assert.strictEqual(mediaDevices.streams.length, 2, 'screen and microphone were acquired');
+  for (const stream of mediaDevices.streams) {
+    for (const track of stream.getTracks()) assert.strictEqual(track.stopped, true, `${track.kind} track must be released`);
+  }
+  assert.strictEqual(errors.length, 1);
+  assert.strictEqual(errors[0].phase, 'start');
+  assert.strictEqual(engine.state, 'error');
+  assert.deepStrictEqual(await writer.listOrphans(), []);
+
+  await fsp.rm(baseDir, { recursive: true, force: true });
+});
+
+test('when the recorded source ends on its own, the recording stops and is finalized', async () => {
+  const baseDir = await freshBaseDir();
+  const writer = new RecordingWriter({ baseDir });
+  const mediaDevices = trackingMediaDevices();
+  const engine = new RecordingEngine({
+    api: makeApi(writer), MediaRecorder: FakeMediaRecorder, MediaStream: FakeMediaStream, mediaDevices, now: () => 1,
+  });
+  FakeMediaRecorder.instances = [];
+
+  const warnings = [];
+  engine.on('warning', (w) => warnings.push(w.code));
+  const finalized = new Promise((res) => engine.on('finalized', res));
+
+  await engine.start({ source: { type: 'window', id: 'w' }, mic: true, recordingId: 'engine-ended' });
+  assert.strictEqual(engine.hasAudio, true);
+  FakeMediaRecorder.instances.at(-1).emit(Buffer.from('frames'));
+
+  // The window closes: its video track ends while the microphone keeps going.
+  mediaDevices.streams[0].getVideoTracks()[0].end();
+
+  const result = await finalized;
+  assert.deepStrictEqual(warnings, ['source-ended']);
+  assert.strictEqual(engine.state, 'idle');
+  assert.deepStrictEqual(await fsp.readFile(result.filePath), Buffer.from('frames'));
+
+  await fsp.rm(baseDir, { recursive: true, force: true });
+});
+
+test('a microphone that disconnects mid-recording raises a warning and the recording continues', async () => {
+  const baseDir = await freshBaseDir();
+  const writer = new RecordingWriter({ baseDir });
+  const mediaDevices = trackingMediaDevices();
+  const engine = new RecordingEngine({
+    api: makeApi(writer), MediaRecorder: FakeMediaRecorder, MediaStream: FakeMediaStream, mediaDevices, now: () => 1,
+  });
+  FakeMediaRecorder.instances = [];
+
+  const warnings = [];
+  engine.on('warning', (w) => warnings.push(w.code));
+  await engine.start({ source: { type: 'screen', id: 's' }, mic: true, recordingId: 'engine-mic' });
+
+  mediaDevices.streams[1].getAudioTracks()[0].end();
+  assert.deepStrictEqual(warnings, ['mic-ended']);
+  assert.strictEqual(engine.state, 'recording');
+  assert.strictEqual(engine.hasAudio, false);
+
+  // Our own cleanup must not be mistaken for a device going away.
+  await engine.cancel();
+  assert.deepStrictEqual(warnings, ['mic-ended']);
 
   await fsp.rm(baseDir, { recursive: true, force: true });
 });

@@ -55,14 +55,18 @@ class RecordingWriter {
     };
 
     const stream = fs.createWriteStream(filePath);
-    // Surface open errors instead of letting them become unhandled.
+    const entry = { stream, filePath, sidecarPath, meta, bytesWritten: 0, error: null };
+    // One listener for the stream's whole life. A write error (disk full,
+    // volume gone) destroys the stream; without a record of it, later writes
+    // would wait forever for a 'drain' that never comes.
+    stream.on('error', (err) => { if (!entry.error) entry.error = err; });
     await new Promise((resolve, reject) => {
       stream.once('open', resolve);
       stream.once('error', reject);
     });
 
     await this._writeSidecar(recordingId, meta);
-    this.active.set(recordingId, { stream, filePath, sidecarPath, meta, bytesWritten: 0 });
+    this.active.set(recordingId, entry);
     return { filePath, sidecarPath };
   }
 
@@ -71,19 +75,20 @@ class RecordingWriter {
     const entry = this.active.get(recordingId);
     if (!entry) throw new Error(`No active recording: ${recordingId}`);
 
+    if (entry.error) throw entry.error;
+
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     if (buf.length === 0) return entry.bytesWritten;
-    entry.bytesWritten += buf.length;
 
-    const ok = entry.stream.write(buf);
-    if (!ok) {
-      await new Promise((resolve, reject) => {
-        const onDrain = () => { entry.stream.off('error', onError); resolve(); };
-        const onError = (err) => { entry.stream.off('drain', onDrain); reject(err); };
-        entry.stream.once('drain', onDrain);
-        entry.stream.once('error', onError);
+    // Resolve once the bytes are handed to the OS (the write callback), which
+    // also gives backpressure: the engine sends the next chunk only after
+    // this one. A failed write rejects here instead of going unnoticed.
+    await new Promise((resolve, reject) => {
+      entry.stream.write(buf, (err) => {
+        if (err) { if (!entry.error) entry.error = err; reject(err); } else resolve();
       });
-    }
+    });
+    entry.bytesWritten += buf.length;
     return entry.bytesWritten;
   }
 
@@ -91,6 +96,14 @@ class RecordingWriter {
   async finalize(recordingId) {
     const entry = this.active.get(recordingId);
     if (!entry) throw new Error(`No active recording: ${recordingId}`);
+
+    if (entry.error) {
+      // The stream is already dead. Whatever reached the disk stays there
+      // with its sidecar, so recovery can still offer it.
+      this.active.delete(recordingId);
+      await this._markInterrupted(recordingId, entry);
+      throw entry.error;
+    }
 
     await new Promise((resolve, reject) => {
       entry.stream.once('error', reject);
@@ -107,14 +120,47 @@ class RecordingWriter {
     return { filePath: entry.filePath, bytesWritten: entry.bytesWritten, sidecarPath: entry.sidecarPath };
   }
 
+  async _markInterrupted(recordingId, entry) {
+    try {
+      await this._writeSidecar(recordingId, {
+        ...entry.meta,
+        status: 'interrupted',
+        bytesWritten: entry.bytesWritten,
+        interruptedAt: Date.now(),
+      });
+    } catch { /* the sidecar written at start still marks the file */ }
+  }
+
+  _closeStream(entry) {
+    return new Promise((resolve) => {
+      if (entry.stream.destroyed) { resolve(); return; }
+      entry.stream.once('close', resolve);
+      entry.stream.end();
+    });
+  }
+
   // Cancel an in-progress recording: close the stream and remove its artifacts.
   async abort(recordingId) {
     const entry = this.active.get(recordingId);
     if (entry) {
-      await new Promise((resolve) => entry.stream.end(resolve));
+      await this._closeStream(entry);
       this.active.delete(recordingId);
     }
     await this.discard(recordingId);
+  }
+
+  // Close every open recording without deleting it, so each one becomes an
+  // orphan that recovery offers. Used when the renderer that was feeding the
+  // streams is gone (reload, crash) or the app is forced to quit.
+  async releaseAll() {
+    const released = [];
+    for (const [recordingId, entry] of [...this.active]) {
+      await this._closeStream(entry);
+      this.active.delete(recordingId);
+      await this._markInterrupted(recordingId, entry);
+      released.push(recordingId);
+    }
+    return released;
   }
 
   // Remove a recording's file + sidecar (after a successful save, or to discard).

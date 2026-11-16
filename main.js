@@ -1,8 +1,9 @@
-const { app, BrowserWindow, ipcMain, dialog, desktopCapturer, systemPreferences, screen, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, desktopCapturer, systemPreferences, shell, Menu } = require('electron');
 const path = require('path');
 const os = require('os');
-const fs = require('fs').promises;
-const { spawn, execFile } = require('child_process');
+const fsSync = require('fs');
+const fs = fsSync.promises;
+const { spawn } = require('child_process');
 // In a packaged app the binary is extracted next to the asar (asarUnpack);
 // the module still reports the in-archive path, which cannot be executed.
 const ffmpeg = require('ffmpeg-static').replace('app.asar', 'app.asar.unpacked');
@@ -16,6 +17,21 @@ let isQuitting = false;
 let recordingWriter; // stream-to-disk writer, constructed once app paths are available
 
 const activeChildProcesses = new Set(); // Track FFmpeg processes for cleanup
+const activePartFiles = new Set();      // Half-written outputs to remove if we quit mid-save
+
+// Two instances would share userData: the second one would see the first
+// one's live recording as an orphan and could discard it. Allow only one.
+const hasInstanceLock = app.requestSingleInstanceLock();
+if (!hasInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+}
 
 // Safe IPC send wrapper to prevent sending to destroyed windows
 function safeSend(window, channel, ...args) {
@@ -58,10 +74,25 @@ function createWindow() {
   });
 
   mainWindow.on('close', (event) => {
-    if (!isQuitting) {
-      event.preventDefault();
-      safeSend(mainWindow, 'app-closing');
-    }
+    if (isQuitting) return;
+    event.preventDefault();
+    // The renderer stops any recording and answers with 'confirm-quit'. If it
+    // cannot answer (crashed or hung), quit anyway instead of leaving a
+    // window that never closes.
+    const asked = safeSend(mainWindow, 'app-closing');
+    clearTimeout(closeFallbackTimer);
+    closeFallbackTimer = setTimeout(forceQuit, asked ? CLOSE_FALLBACK_MS : 0);
+  });
+
+  // A reload or a renderer crash ends whatever recording that renderer was
+  // feeding. Close those files so they show up as recoverable right away.
+  mainWindow.webContents.on('did-start-navigation', (event, url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace) releaseOpenRecordings();
+  });
+  mainWindow.webContents.on('render-process-gone', async (event, details) => {
+    console.error('Renderer process gone:', details && details.reason);
+    await releaseOpenRecordings();
+    if (!isQuitting && mainWindow && !mainWindow.isDestroyed()) mainWindow.reload();
   });
 
   mainWindow.on('closed', () => {
@@ -71,6 +102,61 @@ function createWindow() {
   if (process.env.NODE_ENV === 'development') {
     mainWindow.webContents.openDevTools();
   }
+}
+
+const CLOSE_FALLBACK_MS = 6000; // the renderer allows itself 4s to finalize
+let closeFallbackTimer = null;
+
+async function releaseOpenRecordings() {
+  if (!recordingWriter) return;
+  try {
+    await recordingWriter.releaseAll();
+  } catch (err) {
+    console.error('Could not release open recordings:', err);
+  }
+}
+
+async function forceQuit() {
+  if (isQuitting) return;
+  await releaseOpenRecordings();
+  isQuitting = true;
+  app.quit();
+}
+
+function buildAppMenu() {
+  const isDev = !app.isPackaged;
+  const template = [
+    { role: 'appMenu' },
+    {
+      label: 'File',
+      submenu: [
+        {
+          label: 'Open Recordings Folder',
+          accelerator: 'CmdOrCtrl+Shift+O',
+          click: async () => {
+            const folder = settingsStore.get().folder;
+            await fs.mkdir(folder, { recursive: true }).catch(() => {});
+            shell.openPath(folder);
+          },
+        },
+        { type: 'separator' },
+        { role: 'close' },
+      ],
+    },
+    { role: 'editMenu' },
+    // Reload would cut off a recording in progress, so it exists in
+    // development only.
+    ...(isDev ? [{ label: 'View', submenu: [{ role: 'reload' }, { role: 'forceReload' }, { role: 'toggleDevTools' }] }] : []),
+    { role: 'windowMenu' },
+    {
+      role: 'help',
+      submenu: [
+        { label: 'MyScreen on GitHub', click: () => shell.openExternal('https://github.com/metztim/MyScreen') },
+        { label: 'Report an Issue', click: () => shell.openExternal('https://github.com/metztim/MyScreen/issues') },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 // User settings (recording config + camera overlay layout), persisted in userData.
@@ -102,14 +188,21 @@ function displayFolder(folder) {
   return folder.startsWith(home) ? '~' + folder.slice(home.length) : folder;
 }
 
-ipcMain.handle('settings:get', () => {
-  const settings = settingsStore.get();
-  return { ...settings, folderDisplay: displayFolder(settings.folder) };
-});
+// What the renderer sees: everything except the Dropbox tokens, which only
+// the main process uses.
+function rendererSettings(settings) {
+  const { dropboxAuth, ...rest } = settings;
+  return { ...rest, folderDisplay: displayFolder(settings.folder) };
+}
+
+const MAIN_ONLY_SETTINGS = ['dropboxAuth', 'dropboxAccount', 'dropboxAppKey'];
+
+ipcMain.handle('settings:get', () => rendererSettings(settingsStore.get()));
 
 ipcMain.handle('settings:set', (event, patch) => {
-  const settings = settingsStore.set(patch || {});
-  return { ...settings, folderDisplay: displayFolder(settings.folder) };
+  const clean = { ...(patch || {}) };
+  for (const key of MAIN_ONLY_SETTINGS) delete clean[key];
+  return rendererSettings(settingsStore.set(clean));
 });
 
 // Make sure the configured save folder exists; returns its absolute path.
@@ -147,6 +240,16 @@ ipcMain.handle('library:open', (event, filePath) => {
   if (typeof filePath === 'string' && filePath) shell.openPath(filePath);
 });
 
+// Thumbnail + duration for one file (the Saved sheet shows the new recording).
+ipcMain.handle('library:meta-for', async (event, filePath) => {
+  if (typeof filePath !== 'string' || !filePath) return null;
+  try {
+    return await libraryStore.metaFor(filePath);
+  } catch {
+    return null;
+  }
+});
+
 // --- Dropbox link sharing ---
 
 let dropboxShare = null;
@@ -180,6 +283,14 @@ ipcMain.handle('permissions:check', () => {
 ipcMain.handle('permissions:request', async (event, type) => {
   if (process.platform !== 'darwin') return true;
   if (type === 'camera' || type === 'microphone') {
+    // macOS only prompts once. After a "Don't Allow", the switch in System
+    // Settings is the only way back, so take the user there.
+    const status = systemPreferences.getMediaAccessStatus(type);
+    if (status === 'denied' || status === 'restricted') {
+      const pane = type === 'camera' ? 'Privacy_Camera' : 'Privacy_Microphone';
+      shell.openExternal(`x-apple.systempreferences:com.apple.preference.security?${pane}`);
+      return false;
+    }
     return systemPreferences.askForMediaAccess(type);
   }
   if (type === 'screen') {
@@ -212,6 +323,7 @@ ipcMain.handle('app:relaunch', () => {
 });
 
 app.whenReady().then(async () => {
+  if (!hasInstanceLock) return;
   // Stream-to-disk writer lives under userData so partial recordings survive crashes.
   recordingWriter = new RecordingWriter({
     baseDir: path.join(app.getPath('userData'), 'in-progress')
@@ -237,13 +349,7 @@ app.whenReady().then(async () => {
     openExternal: (url) => shell.openExternal(url),
   });
 
-  if (process.platform === 'darwin') {
-    const status = await systemPreferences.getMediaAccessStatus('screen');
-    if (status !== 'granted') {
-      console.log('Screen recording permission not granted');
-    }
-  }
-
+  buildAppMenu();
   createWindow();
 
   app.on('activate', () => {
@@ -259,7 +365,14 @@ app.on('window-all-closed', () => {
   }
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  // Cmd+Q with a recording still open: route through the window's close
+  // flow so the renderer stops and finalizes it first.
+  if (!isQuitting && recordingWriter && recordingWriter.active.size > 0 && mainWindow && !mainWindow.isDestroyed()) {
+    event.preventDefault();
+    mainWindow.close();
+    return;
+  }
   isQuitting = true;
   // Kill any active FFmpeg processes to prevent orphans
   for (const proc of activeChildProcesses) {
@@ -270,6 +383,10 @@ app.on('before-quit', () => {
     }
   }
   activeChildProcesses.clear();
+  for (const partPath of activePartFiles) {
+    try { fsSync.rmSync(partPath, { force: true }); } catch { /* best effort */ }
+  }
+  activePartFiles.clear();
 });
 
 ipcMain.handle('get-sources', async () => {
@@ -314,160 +431,73 @@ ipcMain.handle('get-sources', async () => {
   }
 });
 
-ipcMain.handle('show-save-dialog', async (event, options) => {
+// Cheap sanity check before handing a recording to ffmpeg: the file exists,
+// is not trivially small, and starts with the EBML magic every WebM has.
+async function looksLikeWebM(inputPath) {
+  const stats = await fs.stat(inputPath);
+  if (stats.size < 100) return false;
+  const fd = await fs.open(inputPath, 'r');
   try {
-    const defaultPath = options.defaultPath || `recording_${Date.now()}.mp4`;
-    
-    const result = await dialog.showSaveDialog(mainWindow, {
-      title: 'Save Recording',
-      defaultPath: path.join(app.getPath('videos'), defaultPath.replace('.webm', '.mp4')),
-      filters: [
-        { name: 'MP4 Video', extensions: ['mp4'] },
-        { name: 'WebM Video', extensions: ['webm'] },
-        { name: 'All Files', extensions: ['*'] }
-      ]
-    });
-
-    return {
-      canceled: result.canceled,
-      filePath: result.filePath
-    };
-  } catch (error) {
-    console.error('Error showing save dialog:', error);
-    throw error;
-  }
-});
-
-async function validateWebMFile(inputPath) {
-  try {
-    // Check if file exists
-    await fs.access(inputPath);
-    
-    // Check file size
-    const stats = await fs.stat(inputPath);
-    if (stats.size < 100) {
-      return { valid: false, error: 'File is too small to be a valid WebM' };
-    }
-    
-    // Check WebM/EBML header (first 4 bytes should be 0x1A45DFA3)
     const buffer = Buffer.alloc(4);
-    const fd = await fs.open(inputPath, 'r');
     await fd.read(buffer, 0, 4, 0);
+    return buffer.toString('hex') === '1a45dfa3';
+  } finally {
     await fd.close();
-    
-    const header = buffer.toString('hex');
-    if (header !== '1a45dfa3') {
-      return { valid: false, error: 'Invalid WebM header. File may be corrupted.' };
-    }
-    
-    // Quick probe with ffmpeg to validate format
-    return new Promise((resolve) => {
-      const probeProcess = spawn(ffmpeg, [
-        '-v', 'error',
-        '-i', inputPath,
-        '-f', 'null', '-'
-      ]);
-      
-      let errorOutput = '';
-      probeProcess.stderr.on('data', (data) => {
-        errorOutput += data.toString();
-      });
-      
-      probeProcess.on('close', (code) => {
-        if (code === 0) {
-          resolve({ valid: true });
-        } else {
-          resolve({ valid: false, error: 'FFmpeg validation failed: ' + errorOutput.substring(0, 200) });
-        }
-      });
-      
-      probeProcess.on('error', () => {
-        resolve({ valid: false, error: 'Failed to run FFmpeg validation' });
-      });
-    });
-  } catch (error) {
-    return { valid: false, error: error.message };
   }
 }
 
-async function convertWebMToMP4(inputPath, outputPath, quality = 'balanced', expectedDurationSeconds = 0) {
-  return new Promise(async (resolve, reject) => {
-    // Validate WebM file before conversion
-    const validation = await validateWebMFile(inputPath);
-    if (!validation.valid) {
-      reject(new Error(`WebM validation failed: ${validation.error}`));
-      return;
-    }
-    
-    // Set FFmpeg parameters based on quality selection
-    let preset, crf, audioBitrate;
-    
-    switch (quality) {
-      case 'fast':
-        preset = 'ultrafast';
-        crf = '18'; // Lower CRF = better quality, larger file
-        audioBitrate = '128k'; // Keep current for speed
-        break;
-      case 'slow':
-        preset = 'slow';
-        crf = '26'; // Higher CRF = more compression, smaller file
-        audioBitrate = '256k'; // High quality audio
-        break;
-      case 'balanced':
-      default:
-        preset = 'fast';
-        crf = '22'; // Balanced quality/size
-        audioBitrate = '192k'; // Improved audio quality
-        break;
-    }
-    
-    // First, get video duration for progress calculation
-    let videoDuration = Number(expectedDurationSeconds) || 0;
-    try {
-      const probeProcess = spawn(ffmpeg, [
-        '-i', inputPath,
-        '-f', 'null', '-'
-      ]);
-      
-      await new Promise((resolve, reject) => {
-        let probeStderr = '';
-        probeProcess.stderr.on('data', (data) => {
-          probeStderr += data.toString();
-        });
-        
-        probeProcess.on('close', () => {
-          // Extract duration from FFmpeg output
-          const durationMatch = probeStderr.match(/Duration: (\d{2}):(\d{2}):(\d{2}\.\d{2})/);
-          if (durationMatch) {
-            const hours = parseInt(durationMatch[1]);
-            const minutes = parseInt(durationMatch[2]);
-            const seconds = parseFloat(durationMatch[3]);
-            videoDuration = hours * 3600 + minutes * 60 + seconds;
-          }
-          resolve();
-        });
-        
-        probeProcess.on('error', reject);
-      });
-    } catch (probeError) {
-      console.warn('Could not determine video duration:', probeError);
-      // Continue without duration info
-    }
-    
-    console.log('Starting FFmpeg conversion with:', {
-      ffmpegPath: ffmpeg,
-      inputPath,
-      outputPath,
-      preset,
-      crf,
-      audioBitrate
-    });
-    
+// Outputs are written to a hidden sibling of the destination and renamed
+// into place only when complete, so the save folder (and anything syncing
+// it) never sees a half-written video.
+function partPathFor(destPath) {
+  const ext = path.extname(destPath);
+  return path.join(path.dirname(destPath), `.${path.basename(destPath, ext)}.part${ext}`);
+}
+
+async function writeAtomically(destPath, produce) {
+  const partPath = partPathFor(destPath);
+  activePartFiles.add(partPath);
+  try {
+    await produce(partPath);
+    await fs.rename(partPath, destPath);
+  } catch (err) {
+    await fs.rm(partPath, { force: true }).catch(() => {});
+    throw err;
+  } finally {
+    activePartFiles.delete(partPath);
+  }
+}
+
+async function moveFile(fromPath, toPath) {
+  try {
+    await fs.rename(fromPath, toPath);
+  } catch (err) {
+    if (err.code !== 'EXDEV') throw err;
+    await fs.copyFile(fromPath, toPath); // cross-volume: copy, the caller discards the source
+  }
+}
+
+const QUALITY_PRESETS = {
+  fast: { preset: 'ultrafast', crf: '18', audioBitrate: '128k' },     // quickest, larger file
+  balanced: { preset: 'fast', crf: '22', audioBitrate: '192k' },
+  slow: { preset: 'slow', crf: '26', audioBitrate: '256k' },          // slowest, smallest file
+};
+
+const FFMPEG_STALL_MS = 60 * 1000;
+
+// Re-encode a WebM recording to H.264/AAC MP4. `durationSeconds` (when known)
+// drives the progress events; the encode itself does not need it.
+function convertWebMToMP4(inputPath, outputPath, quality = 'balanced', durationSeconds = 0) {
+  return new Promise((resolve, reject) => {
+    const { preset, crf, audioBitrate } = QUALITY_PRESETS[quality] || QUALITY_PRESETS.balanced;
+    const videoDuration = Number(durationSeconds) || 0;
+
     const ffmpegProcess = spawn(ffmpeg, [
       '-i', inputPath,
+      // High profile with the level left to the encoder: it picks the one
+      // that matches the frame size (Retina captures need 5.x).
       '-c:v', 'libx264',
-      '-profile:v', 'baseline',
-      '-level', '3.0',
+      '-profile:v', 'high',
       '-pix_fmt', 'yuv420p',
       '-preset', preset,
       '-crf', crf,
@@ -482,28 +512,41 @@ async function convertWebMToMP4(inputPath, outputPath, quality = 'balanced', exp
       // with broken timing.
       '-fps_mode:v', 'vfr',
       '-progress', 'pipe:1',
+      '-f', 'mp4',
       '-y',
       outputPath
     ]);
     activeChildProcesses.add(ffmpegProcess);
-    ffmpegProcess.on('exit', () => activeChildProcesses.delete(ffmpegProcess));
 
     let stderr = '';
     let stdoutProgress = '';
     let lastProgress = 0;
-    let progressTimeout;
+    let stallTimer = null;
     let settled = false;
 
-    const parseTimestampSeconds = (value) => {
-      const match = String(value || '').match(/(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/);
-      if (!match) return null;
-      return (parseInt(match[1]) * 3600) + (parseInt(match[2]) * 60) + parseFloat(match[3]);
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(stallTimer);
+      activeChildProcesses.delete(ffmpegProcess);
+      error ? reject(error) : resolve();
     };
+
+    // No cap on total time (an hour-long recording legitimately takes a
+    // while); only a process that stops producing output is killed.
+    const armStallTimer = () => {
+      clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        ffmpegProcess.kill('SIGKILL');
+        finish(new Error('Video conversion stopped responding.'));
+      }, FFMPEG_STALL_MS);
+    };
+    armStallTimer();
 
     const updateProgress = (currentTime) => {
       if (!videoDuration || !Number.isFinite(currentTime)) return;
-      const progress = Math.min(Math.max((currentTime / videoDuration) * 100, 0), 100);
-      if (progress < lastProgress && lastProgress < 99) return;
+      const progress = Math.min(Math.max((currentTime / videoDuration) * 100, 0), 99);
+      if (progress < lastProgress) return;
       lastProgress = progress;
       safeSend(mainWindow, 'conversion-progress', {
         progress: Math.round(progress),
@@ -512,104 +555,88 @@ async function convertWebMToMP4(inputPath, outputPath, quality = 'balanced', exp
       });
     };
 
-    const safeReject = (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(conversionTimeout);
-      if (progressTimeout) clearTimeout(progressTimeout);
-      reject(error);
-    };
-
-    const safeResolve = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(conversionTimeout);
-      if (progressTimeout) clearTimeout(progressTimeout);
-      resolve();
-    };
-
-    // Set a timeout for the conversion process (5 minutes)
-    const conversionTimeout = setTimeout(() => {
-      ffmpegProcess.kill('SIGKILL');
-      safeReject(new Error('Video conversion is taking longer than expected. This might be due to a large file size or system resources. Try using the "Fast" conversion option or save as WebM format instead.'));
-    }, 5 * 60 * 1000);
-    
-    // Handle progress output from stdout
     ffmpegProcess.stdout.on('data', (data) => {
+      armStallTimer();
       stdoutProgress += data.toString();
-
       const lines = stdoutProgress.split(/\r?\n/);
       stdoutProgress = lines.pop() || '';
       for (const line of lines) {
         const usMatch = line.match(/^out_time_(?:ms|us)=(\d+)/);
-        if (usMatch) {
-          updateProgress(parseInt(usMatch[1]) / 1000000);
-          continue;
-        }
-        const timeMatch = line.match(/^out_time=(.+)$/);
-        if (timeMatch) {
-          updateProgress(parseTimestampSeconds(timeMatch[1]));
-        }
+        if (usMatch) updateProgress(parseInt(usMatch[1], 10) / 1000000);
       }
-      
-      // Reset progress timeout on any output
-      if (progressTimeout) clearTimeout(progressTimeout);
-      progressTimeout = setTimeout(() => {
-        ffmpegProcess.kill('SIGKILL');
-        safeReject(new Error('Video conversion has stopped responding. This may be due to system resources or file corruption. Try restarting the app or using a different quality setting.'));
-      }, 60000); // 60 seconds without progress
     });
 
     ffmpegProcess.stderr.on('data', (data) => {
-      const chunk = data.toString();
-      stderr += chunk;
-      console.log('FFmpeg stderr:', chunk);
-      const timeMatch = chunk.match(/time=(\d{2}:\d{2}:\d{2}(?:\.\d+)?)/);
-      if (timeMatch) updateProgress(parseTimestampSeconds(timeMatch[1]));
-      // Reset progress timeout on any output
-      if (progressTimeout) clearTimeout(progressTimeout);
-      progressTimeout = setTimeout(() => {
-        ffmpegProcess.kill('SIGKILL');
-        safeReject(new Error('Video conversion has stopped responding. This may be due to system resources or file corruption. Try restarting the app or using a different quality setting.'));
-      }, 60000); // 60 seconds without progress
+      armStallTimer();
+      stderr = (stderr + data.toString()).slice(-4000); // keep the tail only
     });
 
     ffmpegProcess.on('close', (code) => {
       if (code === 0) {
         safeSend(mainWindow, 'conversion-progress', {
           progress: 100,
-          currentTime: videoDuration || 0,
-          totalTime: videoDuration || 0
+          currentTime: videoDuration,
+          totalTime: videoDuration
         });
-        safeResolve();
-      } else if (code !== null) {
-        const userError = stderr.includes('No such file')
-          ? 'The video file could not be found. It may have been moved or deleted.'
-          : stderr.includes('Permission denied')
-          ? 'Unable to access the file location. Please check folder permissions and try saving to a different location.'
-          : stderr.includes('No space left')
-          ? 'Not enough disk space available. Please free up space and try again.'
-          : 'Video conversion failed due to an unexpected error. Try using a different quality setting or save as WebM format instead.';
-
-        safeReject(new Error(userError));
+        finish();
+        return;
       }
+      const reason = stderr.includes('No space left')
+        ? 'Not enough disk space to convert the recording.'
+        : stderr.includes('Permission denied')
+          ? 'MyScreen is not allowed to write to the save folder.'
+          : `Video conversion failed (${code === null ? 'interrupted' : 'exit ' + code}).`;
+      console.error('FFmpeg conversion failed:', stderr.slice(-600));
+      finish(new Error(reason));
     });
 
     ffmpegProcess.on('error', (error) => {
-      let userError = '';
-      if (error.code === 'ENOENT') {
-        userError = 'Video conversion tool not found. Please restart the application or reinstall to fix this issue.';
-      } else if (error.code === 'EACCES') {
-        userError = 'Permission denied while converting video. Please check file permissions and try saving to a different location.';
-      } else if (error.message.includes('spawn')) {
-        userError = 'Unable to start video conversion. Try restarting the application or saving as WebM format instead.';
-      } else {
-        userError = 'Video conversion failed due to a system error. Try using a different quality setting or save as WebM format.';
-      }
-
-      safeReject(new Error(userError));
+      finish(new Error(error.code === 'ENOENT'
+        ? 'The bundled video converter is missing. Reinstalling MyScreen fixes this.'
+        : `Could not start video conversion: ${error.message}`));
     });
   });
+}
+
+// Shared by a normal save and by crash recovery: turn the raw recording at
+// `srcPath` into the file the user asked for at `destPath`. Each step falls
+// back to a simpler one, so a recording is never lost to a failed
+// conversion: MP4 encode -> repaired WebM -> the raw file as recorded.
+async function exportRecording({ srcPath, destPath, convert, quality, durationSeconds, statusText }) {
+  if (convert) {
+    safeSend(mainWindow, 'conversion-status', statusText || 'Converting to MP4...');
+    safeSend(mainWindow, 'conversion-start');
+    let conversionError = null;
+    try {
+      if (!(await looksLikeWebM(srcPath))) throw new Error('The recording is not a valid WebM file.');
+      await writeAtomically(destPath, (partPath) => convertWebMToMP4(srcPath, partPath, quality, durationSeconds));
+    } catch (err) {
+      conversionError = err;
+      console.error('Conversion failed, keeping the recording as WebM:', err);
+    }
+    safeSend(mainWindow, 'conversion-complete');
+    safeSend(mainWindow, 'conversion-status', '');
+    if (!conversionError) return { filePath: destPath };
+
+    const webmPath = destPath.replace(/\.mp4$/, '.webm');
+    await exportContainerCopy(srcPath, webmPath);
+    return { filePath: webmPath, conversionFailed: true, error: conversionError.message };
+  }
+
+  await exportContainerCopy(srcPath, destPath);
+  return { filePath: destPath };
+}
+
+// Stream-copy into a fresh container so it carries duration and cues
+// (MediaRecorder output has neither, which breaks seeking). If even that
+// fails, keep the raw file: an unseekable recording beats no recording.
+async function exportContainerCopy(srcPath, destPath) {
+  try {
+    await writeAtomically(destPath, (partPath) => remuxContainer(srcPath, partPath));
+  } catch (remuxError) {
+    console.error('Remux failed, keeping the raw file:', remuxError);
+    await writeAtomically(destPath, (partPath) => fs.copyFile(srcPath, partPath));
+  }
 }
 
 // --- Stream-to-disk recording IPC -------------------------------------------
@@ -640,65 +667,22 @@ ipcMain.handle('recording:abort', async (event, recordingId) => {
   return { success: true };
 });
 
-// Move the finalized recording to the user's chosen path. `convert` is set by
-// the renderer when a WebM recording is being saved as MP4 (a direct-H.264
-// recording saved as .mp4 needs no conversion). Falls back to raw WebM on
-// conversion failure. Reuses convertWebMToMP4.
+// Export the finalized recording to the user's save folder. `convert` is set
+// by the renderer when a WebM recording is being saved as MP4 (a direct-H.264
+// recording saved as .mp4 only needs a container copy).
 ipcMain.handle('recording:save', async (event, { recordingId, destPath, convert, quality, durationSeconds }) => {
   const id = sanitizeRecordingId(recordingId);
-  const tempPath = recordingWriter.filePathFor(id);
+  const srcPath = recordingWriter.filePathFor(id);
 
   try {
-    await fs.access(tempPath);
+    await fs.access(srcPath);
   } catch {
     throw new Error('Recording file not found. It may have already been saved or discarded.');
   }
 
-  if (convert) {
-    const qualityText = {
-      fast: 'Fast conversion...',
-      slow: 'High compression conversion (this may take a while)...',
-      balanced: 'Converting to MP4...'
-    }[quality || 'balanced'];
-    safeSend(mainWindow, 'conversion-status', qualityText);
-    safeSend(mainWindow, 'conversion-start');
-
-    try {
-      await convertWebMToMP4(tempPath, destPath, quality, durationSeconds);
-      safeSend(mainWindow, 'conversion-complete');
-      safeSend(mainWindow, 'conversion-status', 'Conversion complete!');
-      await recordingWriter.discard(id);
-      return { success: true, filePath: destPath };
-    } catch (conversionError) {
-      console.error('Conversion failed, saving as WebM:', conversionError);
-      const webmPath = destPath.replace(/\.mp4$/, '.webm');
-      await fs.copyFile(tempPath, webmPath);
-      await recordingWriter.discard(id);
-      safeSend(mainWindow, 'conversion-complete');
-      safeSend(mainWindow, 'conversion-status', '');
-      return { success: true, filePath: webmPath, conversionFailed: true, error: conversionError.message };
-    }
-  }
-
-  // Direct WebM save: remux so the container carries duration/cues (MediaRecorder
-  // streams lack them, which breaks seeking and duration display). Falls back to
-  // a plain move if the remux fails.
-  try {
-    await remuxToWebM(tempPath, destPath);
-  } catch (remuxError) {
-    console.error('Save remux failed, moving raw file:', remuxError);
-    try {
-      await fs.rename(tempPath, destPath);
-    } catch (err) {
-      if (err.code === 'EXDEV') {
-        await fs.copyFile(tempPath, destPath); // cross-volume: copy then remove
-      } else {
-        throw err;
-      }
-    }
-  }
+  const result = await exportRecording({ srcPath, destPath, convert, quality, durationSeconds });
   await recordingWriter.discard(id);
-  return { success: true, filePath: destPath };
+  return { success: true, ...result };
 });
 
 // --- Crash recovery ----------------------------------------------------------
@@ -706,21 +690,30 @@ ipcMain.handle('recording:save', async (event, { recordingId, destPath, convert,
 // sidecar. We repair the container with a remux pass (rewrites duration/cues so
 // it seeks correctly) before saving it where the user wants.
 
-function remuxToWebM(inputPath, outputPath) {
+function remuxContainer(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
-    const proc = spawn(ffmpeg, ['-y', '-i', inputPath, '-c', 'copy', outputPath]);
+    const format = path.extname(outputPath).toLowerCase() === '.mp4' ? 'mp4' : 'webm';
+    const args = ['-y', '-i', inputPath, '-c', 'copy'];
+    if (format === 'mp4') args.push('-movflags', '+faststart');
+    args.push('-f', format, outputPath);
+    const proc = spawn(ffmpeg, args);
     activeChildProcesses.add(proc);
     let stderr = '';
     let settled = false;
+    let stallTimer = null;
     const finish = (err) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timeout);
+      clearTimeout(stallTimer);
       activeChildProcesses.delete(proc);
       err ? reject(err) : resolve();
     };
-    const timeout = setTimeout(() => { proc.kill('SIGKILL'); finish(new Error('Remux timed out')); }, 5 * 60 * 1000);
-    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    const armStallTimer = () => {
+      clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => { proc.kill('SIGKILL'); finish(new Error('Remux stopped responding')); }, FFMPEG_STALL_MS);
+    };
+    armStallTimer();
+    proc.stderr.on('data', (d) => { armStallTimer(); stderr = (stderr + d.toString()).slice(-2000); });
     proc.on('close', (code) => finish(code === 0 ? null : new Error(`Remux failed: ${stderr.slice(-200)}`)));
     proc.on('error', (e) => finish(e));
   });
@@ -738,44 +731,31 @@ ipcMain.handle('recording:discard', async (event, recordingId) => {
 ipcMain.handle('recording:recover', async (event, { recordingId, destPath, convert, quality }) => {
   const id = sanitizeRecordingId(recordingId);
   const srcPath = recordingWriter.filePathFor(id);
+  let stat;
   try {
-    await fs.access(srcPath);
+    stat = await fs.stat(srcPath);
   } catch {
     throw new Error('Recovery file not found. It may have already been recovered or discarded.');
   }
 
-  if (convert) {
-    safeSend(mainWindow, 'conversion-status', 'Recovering and converting to MP4...');
-    safeSend(mainWindow, 'conversion-start');
-    try {
-      await convertWebMToMP4(srcPath, destPath, quality);
-      safeSend(mainWindow, 'conversion-complete');
-      safeSend(mainWindow, 'conversion-status', 'Recovery complete!');
-      await recordingWriter.discard(id);
-      return { success: true, filePath: destPath };
-    } catch (conversionError) {
-      console.error('Recovery conversion failed, repairing as WebM:', conversionError);
-      const webmPath = destPath.replace(/\.mp4$/, '.webm');
-      try { await remuxToWebM(srcPath, webmPath); } catch { await fs.copyFile(srcPath, webmPath); }
-      safeSend(mainWindow, 'conversion-complete');
-      safeSend(mainWindow, 'conversion-status', '');
-      await recordingWriter.discard(id);
-      return { success: true, filePath: webmPath, conversionFailed: true };
-    }
-  }
-
-  // WebM: repair the container so duration/seeking are correct after a crash.
+  // No recorded duration survives a crash. The span between the start time
+  // in the sidecar and the last write is close enough for a progress bar.
+  let durationSeconds = 0;
   try {
-    await remuxToWebM(srcPath, destPath);
-  } catch (remuxError) {
-    console.error('Remux failed, copying raw file:', remuxError);
-    await fs.copyFile(srcPath, destPath);
-  }
+    const meta = JSON.parse(await fs.readFile(recordingWriter.sidecarPathFor(id), 'utf-8'));
+    if (meta.startedAt) durationSeconds = Math.max(0, (stat.mtimeMs - meta.startedAt) / 1000);
+  } catch { /* progress stays indeterminate */ }
+
+  const result = await exportRecording({
+    srcPath, destPath, convert, quality, durationSeconds,
+    statusText: 'Recovering and converting to MP4...',
+  });
   await recordingWriter.discard(id);
-  return { success: true, filePath: destPath };
+  return { success: true, ...result };
 });
 
 ipcMain.on('confirm-quit', () => {
+  clearTimeout(closeFallbackTimer);
   isQuitting = true;
   app.quit();
 });

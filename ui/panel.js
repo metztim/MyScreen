@@ -183,7 +183,7 @@
               e('div', { className: 'field-note', style: { marginTop: 6 } },
                 s.quality === 'fast' ? 'Quickest to save · larger file.' :
                 s.quality === 'small' ? 'Slower to save · smallest file.' :
-                'Recommended — good quality, reasonable size.'),
+                'Recommended: good quality, reasonable size.'),
             ),
             e('div', null,
               e('div', { className: 'field-lbl' }, 'Save to'),
@@ -196,7 +196,7 @@
             e(PopRow, { title: '3-2-1 countdown', sub: 'Before recording starts', on: s.countdownOn, onChange: (v) => set({ countdownOn: v }) }),
             e('div', { className: 'pop-div' }),
             e('div', { className: 'pop-title', style: { color: 'var(--muted)' } }, 'Advanced'),
-            e(PopRow, { title: 'Hardware encoding', sub: 'Beta · faster H.264 on supported Macs', on: s.hwEncode, onChange: (v) => set({ hwEncode: v }) }),
+            e(PopRow, { title: 'Hardware encoding', sub: 'Beta · saves instantly, but a crash loses the recording', on: s.hwEncode, onChange: (v) => set({ hwEncode: v }) }),
             e(PopRow, { title: 'Floating controls', sub: 'Mini control bar while recording', on: s.floatingOn, onChange: (v) => set({ floatingOn: v }) }),
           ),
         }),

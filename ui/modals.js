@@ -44,7 +44,7 @@
             e('div', { className: 'h' }, 'Choose what to record'),
             e('div', { className: 'sub' }, 'Pick a screen or an open app window.'),
           ),
-          e('button', { className: 'sheet-x', onClick: actions.closePicker }, e(Icon, { name: 'x', size: 18 })),
+          e('button', { className: 'sheet-x', onClick: actions.closePicker, 'aria-label': 'Close' }, e(Icon, { name: 'x', size: 18 })),
         ),
         e('div', { className: 'sheet-body' },
           e('div', { className: 'picker-search' },
@@ -161,12 +161,15 @@
             rows.map((r) => {
               const ok = P[r.key] === 'ok';
               if (r.key === 'screen') return screenRow(r, ok);
+              // After a "Don't Allow", macOS never asks again: the button
+              // leads to the switch in System Settings instead.
+              const denied = P[r.key] === 'denied';
               return e('div', { key: r.key, className: 'perm ' + (ok ? 'ok' : 'todo') },
                 e('div', { className: 'pic' }, e(Icon, { name: ok ? 'check' : r.icon, size: 20 })),
-                e('div', { className: 'ptx' }, e('div', { className: 't' }, r.t), e('div', { className: 's' }, ok ? 'Granted' : r.s)),
+                e('div', { className: 'ptx' }, e('div', { className: 't' }, r.t), e('div', { className: 's' }, ok ? 'Granted' : denied ? 'Turned off in System Settings. Switch MyScreen on there.' : r.s)),
                 ok
                   ? e('span', { className: 'status' }, e(Icon, { name: 'check', size: 14 }), 'Ready')
-                  : e('button', { className: 'perm-act', onClick: () => actions.grant(r.key) }, r.act),
+                  : e('button', { className: 'perm-act', onClick: () => actions.grant(r.key) }, denied ? 'Open Settings' : r.act),
               );
             }),
           ),
@@ -185,7 +188,7 @@
     );
   }
 
-  function Recovery({ actions, recoverable }) {
+  function Recovery({ actions, recoverable, folder }) {
     const item = (recoverable && recoverable[0]) || {};
     return e('div', { className: 'scrim' },
       e('div', { className: 'sheet sm' },
@@ -194,7 +197,7 @@
             e(Icon, { name: 'refresh', size: 20 })),
           e('div', null,
             e('div', { className: 'h' }, 'We found an unsaved recording'),
-            e('div', { className: 'sub' }, 'MyScreen closed before this one finished saving. It’s safe.'),
+            e('div', { className: 'sub' }, 'This recording was interrupted before it was saved. It’s safe.'),
           ),
         ),
         e('div', { className: 'sheet-body' },
@@ -204,6 +207,11 @@
               e('div', { style: { fontSize: 14, fontWeight: 700, color: 'var(--ink)' } }, item.title || 'Screen recording'),
               e('div', { style: { fontSize: 12.5, color: 'var(--muted)', marginTop: 3, lineHeight: 1.5 } }, item.when || '', item.when ? e('br') : null, item.detail || ''),
             ),
+          ),
+          e('div', { style: { fontSize: 12, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 7, marginTop: 12 } },
+            e(Icon, { name: 'folder', size: 14 }),
+            e('span', { style: { flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, 'Saves to ' + (folder || '')),
+            e('button', { className: 'link-btn', onClick: actions.chooseFolder }, 'Change'),
           ),
         ),
         e('div', { className: 'sheet-foot' },
@@ -221,7 +229,7 @@
         e('div', { className: 'sheet-head' },
           e('div', null,
             e('div', { className: 'h' }, 'Saving your recording'),
-            e('div', { className: 'sub' }, s.format === 'mp4' ? 'Converting to MP4 — you can keep this open.' : 'Finishing up — you can keep this open.'),
+            e('div', { className: 'sub' }, s.format === 'mp4' ? 'Converting to MP4. Longer recordings take a little while.' : 'Finishing up.'),
           ),
         ),
         e('div', { className: 'sheet-body' },
@@ -257,7 +265,7 @@
     if (s.shareState === 'error') {
       return e('div', { className: 'share-box' },
         e(Icon, { name: 'alert', size: 15, style: { color: 'var(--orange)', flex: '0 0 auto' } }),
-        e('span', { className: 'url' }, 'Upload failed — the file is saved locally.'),
+        e('span', { className: 'url' }, 'Upload failed. The file is saved on this Mac.'),
         e('button', { className: 'share-copy', onClick: actions.retryShare }, 'Retry'),
       );
     }
@@ -272,6 +280,8 @@
   }
 
   function Saved({ s, actions }) {
+    // The file on disk is the truth: a failed MP4 conversion saves a WebM.
+    const savedFormat = /\.webm$/i.test(s.lastFileName || '') ? 'WebM' : 'MP4';
     return e('div', { className: 'scrim' },
       e('div', { className: 'sheet sm', style: { maxWidth: 520 } },
         e('div', { className: 'sheet-head' },
@@ -279,12 +289,13 @@
             e(Icon, { name: 'check', size: 22, strokeWidth: 2.4 })),
           e('div', null,
             e('div', { className: 'h' }, 'Saved! Nice recording.'),
-            e('div', { className: 'sub' }, (s.format === 'mp4' ? 'MP4' : 'WebM') + ' · ' + actions.fmt(s.lastDuration || 0) + ' · saved to ' + s.folder),
+            e('div', { className: 'sub' }, savedFormat + (s.lastDuration ? ' · ' + actions.fmt(s.lastDuration) : '') + ' · saved to ' + s.folder),
           ),
         ),
         e('div', { className: 'sheet-body' },
           e('div', { className: 'save-stage' },
-            e('div', { className: 'save-thumb' }, e(Thumb, { item: { thumbnail: s.lastThumbnail } }),
+            e('button', { className: 'save-thumb playable', onClick: actions.openLastRecording, title: 'Play the recording', 'aria-label': 'Play the recording' },
+              e(Thumb, { item: { thumbnail: s.lastThumbnail } }),
               e('div', { className: 'play' }, e('div', { className: 'pc' }, e(Icon, { name: 'play', size: 20, fill: 'currentColor' }))),
             ),
             e('div', { className: 'saved-name' }, s.lastFileName || ''),
@@ -301,10 +312,16 @@
     );
   }
 
-  function Toast({ msg }) {
+  // info: brief confirmation. warn: something degraded. error: stays until
+  // dismissed, because it reports something the user must not miss.
+  function Toast({ msg, kind = 'info', onDismiss }) {
     if (!msg) return null;
-    return e('div', { style: { position: 'absolute', left: '50%', bottom: 96, transform: 'translateX(-50%)', zIndex: 60, background: 'rgba(22,24,30,.95)', color: '#fff', padding: '11px 16px', borderRadius: 10, fontSize: 13, fontWeight: 500, boxShadow: 'var(--sh-pop)', display: 'flex', alignItems: 'center', gap: 9, animation: 'pop .2s ease' } },
-      e(Icon, { name: 'info', size: 16, style: { color: 'var(--blue)' } }), msg);
+    const problem = kind === 'warn' || kind === 'error';
+    return e('div', { className: 'toast ' + kind, role: problem ? 'alert' : 'status' },
+      e(Icon, { name: problem ? 'alert' : 'info', size: 16, className: 'toast-ic' }),
+      e('span', { className: 'toast-msg' }, msg),
+      problem ? e('button', { className: 'toast-x', onClick: onDismiss, 'aria-label': 'Dismiss' }, e(Icon, { name: 'x', size: 14 })) : null,
+    );
   }
 
   Object.assign(window, { Picker, Permissions, Recovery, Saving, Saved, Toast });

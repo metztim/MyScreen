@@ -67,6 +67,7 @@ class RecordingEngine {
     this._drawFrame = null;
     this._pausedAccumMs = 0;
     this._pausedAt = null;
+    this._trackListeners = [];
   }
 
   // --- events --------------------------------------------------------------
@@ -95,6 +96,10 @@ class RecordingEngine {
   get isRecording() { return this._state === STATES.RECORDING || this._state === STATES.PAUSED; }
   get isPaused() { return this._state === STATES.PAUSED; }
   get stream() { return this._stream; }
+  // True while the recording carries a live audio track (the microphone).
+  get hasAudio() {
+    return !!this._stream && this._stream.getAudioTracks().some((t) => t.readyState !== 'ended');
+  }
 
   // Recorded duration: wall time minus the spans spent paused.
   getDurationMs() {
@@ -124,6 +129,7 @@ class RecordingEngine {
     try {
       const recordingId = options.recordingId || `recording_${this.now()}_${Math.floor(Math.random() * 1e6)}`;
       const stream = await this.acquireStream(options);
+      this._stream = stream; // owned from here on, so a later failure releases it
       if (!stream || stream.getVideoTracks().length === 0) {
         throw new Error('No video track was captured from the selected source.');
       }
@@ -134,7 +140,6 @@ class RecordingEngine {
         videoBitsPerSecond: options.videoBitsPerSecond || DEFAULT_BITRATE,
       });
 
-      this._stream = stream;
       this._recorder = recorder;
       this._recordingId = recordingId;
       this._mimeType = mimeType;
@@ -146,13 +151,13 @@ class RecordingEngine {
       recorder.start(options.timesliceMs || DEFAULT_TIMESLICE_MS);
 
       this._setState(STATES.RECORDING);
-      this._emit('started', { recordingId, mimeType });
+      this._emit('started', { recordingId, mimeType, hasAudio: this.hasAudio });
       return { recordingId, mimeType };
     } catch (err) {
       this._stopTracks();
       // If the IPC start succeeded but something after failed, drop the orphan.
       if (this._recordingId) { try { await this.api.recordingAbort(this._recordingId); } catch { /* best effort */ } }
-      this._fail(err);
+      this._fail(err, 'start');
       throw err;
     }
   }
@@ -244,14 +249,47 @@ class RecordingEngine {
     }
   }
 
-  _fail(error) {
+  // phase: 'start' when the recording never began, 'recording' otherwise.
+  // The event carries `released`: a promise that settles once the partial
+  // file on disk has been closed, so recovery can offer it right away.
+  _fail(error, phase = 'recording') {
     if (this._state === STATES.ERROR) return;
+    const recordingId = this._recordingId;
+    const pendingWrites = this._writeChain;
     this._setState(STATES.ERROR);
     this._stopTracks();
-    this._emit('error', { error });
+    const released = phase === 'recording' && recordingId
+      ? Promise.resolve(pendingWrites).catch(() => {})
+        .then(() => this.api.recordingFinalize(recordingId))
+        .then(() => {}, () => {})
+      : Promise.resolve();
+    this._emit('error', { error, phase, released });
+  }
+
+  // Run `handler` when a capture track ends on its own (window closed,
+  // display or device unplugged). track.stop() does not fire 'ended', so our
+  // own cleanup never triggers these.
+  _watchTrack(track, handler) {
+    if (!track || typeof track.addEventListener !== 'function') return;
+    const listener = () => handler();
+    track.addEventListener('ended', listener);
+    this._trackListeners.push({ track, listener });
+  }
+
+  _onSourceEnded() {
+    if (this._state !== STATES.RECORDING && this._state !== STATES.PAUSED) return;
+    this._emit('warning', {
+      code: 'source-ended',
+      message: 'The source being recorded is no longer available. The recording was stopped and saved up to that point.',
+    });
+    this.stop();
   }
 
   _stopTracks() {
+    for (const { track, listener } of this._trackListeners) {
+      try { track.removeEventListener('ended', listener); } catch { /* ignore */ }
+    }
+    this._trackListeners = [];
     if (this._drawFrame && this.cancelAnimationFrame) {
       try { this.cancelAnimationFrame(this._drawFrame); } catch { /* ignore */ }
       this._drawFrame = null;
@@ -274,6 +312,10 @@ class RecordingEngine {
   async acquireStream(options = {}) {
     const source = options.source || { type: 'screen' };
     const base = await this._acquireVideoAndSystemAudio(source, options.systemAudio);
+    // Owned as soon as it exists: if the camera or recorder setup fails
+    // after this point, _stopTracks still releases the capture.
+    this._ownedStreams.push(base);
+    for (const track of base.getVideoTracks()) this._watchTrack(track, () => this._onSourceEnded());
 
     const recordingStream = new this.MediaStream();
     if (options.cameraOverlay && source.type !== 'camera') {
@@ -289,7 +331,16 @@ class RecordingEngine {
 
     if (options.mic) {
       const micTracks = await this._acquireMicTracks(options.micDeviceId);
-      for (const track of micTracks) recordingStream.addTrack(track);
+      for (const track of micTracks) {
+        recordingStream.addTrack(track);
+        this._watchTrack(track, () => {
+          if (this._state !== STATES.RECORDING && this._state !== STATES.PAUSED) return;
+          this._emit('warning', {
+            code: 'mic-ended',
+            message: 'The microphone was disconnected. The rest of this recording has no sound.',
+          });
+        });
+      }
     }
     return recordingStream;
   }
@@ -311,6 +362,20 @@ class RecordingEngine {
       },
       audio: false,
     });
+    this._ownedStreams.push(camera);
+    // A camera that disappears mid-recording drops out of the picture
+    // instead of freezing on its last frame.
+    let cameraLive = true;
+    for (const track of camera.getVideoTracks()) {
+      this._watchTrack(track, () => {
+        cameraLive = false;
+        if (this._state !== STATES.RECORDING && this._state !== STATES.PAUSED) return;
+        this._emit('warning', {
+          code: 'camera-ended',
+          message: 'The camera was disconnected. The recording continues without the camera overlay.',
+        });
+      });
+    }
     const cameraVideo = this.document.createElement('video');
     cameraVideo.muted = true;
     cameraVideo.playsInline = true;
@@ -339,6 +404,10 @@ class RecordingEngine {
 
     const draw = () => {
       ctx.drawImage(sourceVideo, 0, 0, width, height);
+      if (!cameraLive) {
+        this._drawFrame = this.requestAnimationFrame(draw);
+        return;
+      }
       ctx.save();
       // Clip to the bubble shape, then draw the camera covering it (center-crop).
       ctx.beginPath();
@@ -367,17 +436,19 @@ class RecordingEngine {
 
     const stream = canvas.captureStream(30);
     for (const track of base.getAudioTracks()) stream.addTrack(track);
-
-    this._ownedStreams.push(base, camera);
     return stream;
   }
 
+  // play() settles once frames are flowing, which also means the dimensions
+  // are known. (Waiting on 'loadedmetadata' first could hang: the event may
+  // already have fired by the time the listener is attached.)
   async _playVideo(video) {
-    await new Promise((resolve) => {
-      if (video.readyState >= 2) resolve();
-      else video.onloadedmetadata = resolve;
-    });
     await video.play();
+    if (video.videoWidth) return;
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 2000);
+      video.addEventListener('loadedmetadata', () => { clearTimeout(timer); resolve(); }, { once: true });
+    });
   }
 
   async _acquireVideoAndSystemAudio(source, systemAudio) {
@@ -429,14 +500,16 @@ class RecordingEngine {
       : { audio: { echoCancellation: true, noiseSuppression: true } };
     try {
       const stream = await this.mediaDevices.getUserMedia(constraints);
+      this._ownedStreams.push(stream);
       return stream.getAudioTracks();
     } catch (err) {
       try {
         const stream = await this.mediaDevices.getUserMedia({ audio: true });
-        this._emit('warning', { code: 'mic-fallback', message: 'Selected microphone unavailable; using the default.' });
+        this._ownedStreams.push(stream);
+        this._emit('warning', { code: 'mic-fallback', message: 'The selected microphone is unavailable. Recording with the default microphone.' });
         return stream.getAudioTracks();
       } catch (err2) {
-        this._emit('warning', { code: 'mic-unavailable', message: 'Microphone unavailable; recording without it.' });
+        this._emit('warning', { code: 'mic-unavailable', message: 'No microphone is available. This recording has no sound.' });
         return [];
       }
     }

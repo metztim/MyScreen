@@ -33,7 +33,9 @@
     recoverable: [],
     previewStream: null, camStream: null,
     permState: { screen: 'ok', cam: 'ok', mic: 'ok' },
-    toastMsg: '',
+    recHasAudio: true,             // the running recording carries a live mic track
+    lastThumbnail: null,
+    toastMsg: '', toastKind: 'info',
   };
 
   // settings persisted across sessions (must exist in main.js SETTINGS_DEFAULTS)
@@ -53,10 +55,12 @@
     const sRef = useRef(s); sRef.current = s;
     const toastT = useRef(null);
 
-    function toast(msg) {
-      set({ toastMsg: msg || '' });
+    // info fades quickly, warn stays a little longer, error stays until dismissed
+    function toast(msg, kind = 'info') {
+      set({ toastMsg: msg || '', toastKind: kind });
       clearTimeout(toastT.current);
-      toastT.current = setTimeout(() => set({ toastMsg: '' }), 3200);
+      if (!msg || kind === 'error') return;
+      toastT.current = setTimeout(() => set({ toastMsg: '' }), kind === 'warn' ? 7000 : 3200);
     }
 
     // one controller for the app's lifetime
@@ -134,6 +138,8 @@
       recover: () => c.recoverFirst(),
       discardRecovery: () => c.discardFirstRecoverable(),
       reveal: () => c.reveal(),
+      openLastRecording: () => c.openLastRecording(),
+      dismissToast: () => toast(''),
       openRecording: (r) => c.openRecording(r),
       chooseFolder: () => c.chooseFolder(),
       connectDropbox: () => c.connectDropbox(),
@@ -150,7 +156,10 @@
     useEffect(() => {
       function onKey(ev) {
         const st = sRef.current;
-        if (ev.code === 'Space' && st.flow === 'ready' && st.view === 'recorder' && ev.target.tagName !== 'INPUT' && ev.target.tagName !== 'SELECT') {
+        // Space belongs to whatever control has focus (it toggles a switch,
+        // opens a row). It only starts a recording when no control does.
+        const onControl = ev.target.closest && ev.target.closest('button, [role="button"], [role="switch"], input, select, textarea, a');
+        if (ev.code === 'Space' && !ev.repeat && st.flow === 'ready' && st.view === 'recorder' && !onControl) {
           ev.preventDefault(); c.startRecording();
         } else if (ev.code === 'Escape') {
           if (st.flow === 'overlayEdit') setFlow('ready');
@@ -164,7 +173,7 @@
     // --- derived transport content ---------------------------------------------
     const stateInfo = (() => {
       switch (s.flow) {
-        case 'recording': return { led: 'rec', t: 'Recording', sub: (s.mode === 'screen' ? 'Full screen' : s.mode === 'window' ? (source ? source.app : 'Window') : 'Camera') + (s.micOn ? ' · mic on' : '') };
+        case 'recording': return { led: 'rec', t: 'Recording', sub: (s.mode === 'screen' ? 'Full screen' : s.mode === 'window' ? (source ? source.app : 'Window') : 'Camera') + (s.recHasAudio ? ' · mic on' : ' · no sound') };
         case 'paused': return { led: 'busy', t: 'Paused', sub: 'Recording is paused' };
         case 'stopping': return { led: 'busy', t: 'Finishing up…', sub: 'Writing the final chunk' };
         case 'countdown': return { led: 'busy', t: 'Starting…', sub: 'Get ready' };
@@ -209,10 +218,10 @@
 
       s.flow === 'picker' ? e(window.Picker, { s: { ...s, source }, actions }) : null,
       s.flow === 'permissions' ? e(window.Permissions, { s, actions }) : null,
-      s.flow === 'recovery' ? e(window.Recovery, { actions, recoverable: s.recoverable }) : null,
+      s.flow === 'recovery' ? e(window.Recovery, { actions, recoverable: s.recoverable, folder: s.folder }) : null,
       s.flow === 'saving' ? e(window.Saving, { s, actions }) : null,
       s.flow === 'saved' ? e(window.Saved, { s, actions }) : null,
-      e(window.Toast, { msg: s.toastMsg }),
+      e(window.Toast, { msg: s.toastMsg, kind: s.toastKind, onDismiss: actions.dismissToast }),
     );
   }
 
@@ -227,13 +236,13 @@
       recordingNow
         ? e('div', { style: { display: 'flex', gap: 10 } },
             pauseSupported
-              ? e('button', { className: 'btn-ghost', onClick: actions.togglePause, title: s.flow === 'paused' ? 'Resume' : 'Pause' }, e(Icon, { name: s.flow === 'paused' ? 'play' : 'pause', size: 18, fill: s.flow === 'paused' ? 'currentColor' : 'none' }))
+              ? e('button', { className: 'btn-ghost', onClick: actions.togglePause, title: s.flow === 'paused' ? 'Resume' : 'Pause', 'aria-label': s.flow === 'paused' ? 'Resume recording' : 'Pause recording' }, e(Icon, { name: s.flow === 'paused' ? 'play' : 'pause', size: 18, fill: s.flow === 'paused' ? 'currentColor' : 'none' }))
               : null,
             e('button', { className: 'btn btn-stop', onClick: actions.stop }, e('span', { className: 'sq' }), 'Stop'),
           )
         : s.flow === 'stopping'
           ? e('button', { className: 'btn btn-stop', disabled: true }, 'Finishing…')
-          : e('button', { className: 'btn btn-rec', disabled: s.flow === 'countdown', onClick: actions.startRecording }, e('span', { className: 'rec-dot' }), 'Start recording'),
+          : e('button', { className: 'btn btn-rec', disabled: s.flow === 'countdown', onClick: actions.startRecording, title: 'Start recording (Space)' }, e('span', { className: 'rec-dot' }), 'Start recording'),
     );
   }
 

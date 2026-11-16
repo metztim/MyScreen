@@ -142,3 +142,45 @@ test('listOrphans cleans up a zero-byte recording rather than offering it', asyn
 
   await fsp.rm(baseDir, { recursive: true, force: true });
 });
+
+test('a failed stream rejects later writes and finalize instead of hanging, and keeps the file recoverable', async () => {
+  const baseDir = await freshBaseDir();
+  const writer = new RecordingWriter({ baseDir });
+  await writer.start({ recordingId: 'disk-full', mimeType: 'video/webm' });
+  await writer.write('disk-full', Buffer.from('written-before-the-error'));
+
+  // What a full disk looks like from here: the stream errors and is destroyed.
+  const diskFull = Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+  writer.active.get('disk-full').stream.destroy(diskFull);
+  await new Promise((r) => setTimeout(r, 20));
+
+  await assert.rejects(() => writer.write('disk-full', Buffer.from('lost')), /ENOSPC/);
+  await assert.rejects(() => writer.finalize('disk-full'), /ENOSPC/);
+
+  // The bytes that reached the disk are still offered by recovery.
+  const orphans = await writer.listOrphans();
+  assert.strictEqual(orphans.length, 1);
+  assert.strictEqual(orphans[0].recordingId, 'disk-full');
+  assert.strictEqual(orphans[0].status, 'interrupted');
+  assert.strictEqual(orphans[0].size, 'written-before-the-error'.length);
+
+  await fsp.rm(baseDir, { recursive: true, force: true });
+});
+
+test('releaseAll closes open recordings and leaves them as recoverable orphans', async () => {
+  const baseDir = await freshBaseDir();
+  const writer = new RecordingWriter({ baseDir });
+  await writer.start({ recordingId: 'live-1', mimeType: 'video/webm' });
+  await writer.write('live-1', Buffer.from('partial'));
+
+  // Still being written: not an orphan yet.
+  assert.deepStrictEqual(await writer.listOrphans(), []);
+
+  assert.deepStrictEqual(await writer.releaseAll(), ['live-1']);
+  const orphans = await writer.listOrphans();
+  assert.strictEqual(orphans.length, 1);
+  assert.strictEqual(orphans[0].status, 'interrupted');
+  assert.deepStrictEqual(await fsp.readFile(orphans[0].filePath), Buffer.from('partial'));
+
+  await fsp.rm(baseDir, { recursive: true, force: true });
+});
