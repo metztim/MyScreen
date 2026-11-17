@@ -51,6 +51,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   recoverRecording: (data) => ipcRenderer.invoke('recording:recover', data),
   discardRecording: (recordingId) => ipcRenderer.invoke('recording:discard', recordingId),
 
+  // Agent files (transcript, key frames) and the MCP server.
+  agentInfo: () => ipcRenderer.invoke('agent:info'),
+  onAgentStatus: (callback) => replaceListener('agent:status', (event, status) => callback(status)),
+  agentEnsure: (filePath) => ipcRenderer.invoke('agent:ensure', filePath),
+  modelDownload: () => ipcRenderer.invoke('model:download'),
+  modelCancel: () => ipcRenderer.invoke('model:cancel'),
+  onModelProgress: (callback) => replaceListener('model:progress', (event, progress) => callback(progress)),
+
+  // Controls outside the window: status out, commands in.
+  sendRecordingStatus: (status) => ipcRenderer.send('recording:status', status),
+  onControlsCommand: (callback) => replaceListener('controls:command', (event, command) => callback(command)),
+  onWindowVisibility: (callback) => replaceListener('window:visibility', (event, visible) => callback(visible)),
+
   // App lifecycle.
   onAppClosing: (callback) => replaceListener('app-closing', callback),
   confirmQuit: () => ipcRenderer.send('confirm-quit'),

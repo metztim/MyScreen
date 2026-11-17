@@ -64,6 +64,38 @@
     );
   }
 
+  // "Copy" button that confirms in place.
+  function CopyAction({ icon, label, onCopy }) {
+    const [copied, setCopied] = useState(false);
+    return e('button', {
+      className: 'pop-action',
+      onClick: async () => { if (await onCopy()) { setCopied(true); setTimeout(() => setCopied(false), 1800); } },
+    }, e(Icon, { name: copied ? 'check' : icon, size: 14 }), copied ? 'Copied. Paste it in a terminal' : label);
+  }
+
+  // The one-time speech model download, wherever it is offered.
+  function ModelDownload({ s, actions }) {
+    const model = s.agentInfo && s.agentInfo.model;
+    if (!model) return null;
+    const mb = Math.round(model.sizeBytes / 1e6);
+    const dl = s.modelDl;
+    if (dl.state === 'downloading' || dl.state === 'verifying') {
+      return e('div', { className: 'model-dl' },
+        e('div', { className: 'prog' }, e('div', { className: 'fill', style: { width: dl.percent + '%' } })),
+        e('div', { className: 'prog-meta', style: { marginTop: 6 } },
+          e('span', null, dl.state === 'verifying' ? 'Checking the download…' : 'Downloading… ' + dl.percent + '% of ' + mb + ' MB'),
+          dl.state === 'downloading' ? e('button', { className: 'link-btn', onClick: actions.cancelModelDownload }, 'Cancel') : null,
+        ),
+      );
+    }
+    return e('div', { className: 'model-dl' },
+      dl.state === 'failed' ? e('div', { className: 'field-note', style: { color: 'var(--red)' } }, dl.detail) : null,
+      e('button', { className: 'pop-action', onClick: actions.downloadModel },
+        e(Icon, { name: 'download', size: 14 }),
+        (dl.state === 'failed' || dl.percent > 0 ? 'Resume download' : 'Download speech model') + ' (' + mb + ' MB)'),
+    );
+  }
+
   function SetupPanel({ s, set, actions }) {
     const camActive = s.camOn && s.mode !== 'camera';
     const [pop, setPop] = useState(null); // camera | mic | sys | output
@@ -76,12 +108,15 @@
       return () => window.removeEventListener('keydown', onKey);
     }, []);
     useEffect(() => { if (s.flow !== 'ready') setPop(null); }, [s.flow]);
+    // whisper.cpp may have been installed since launch
+    useEffect(() => { if (pop === 'agent') actions.refreshAgentInfo(); }, [pop]);
+    const agent = s.agentInfo;
 
     const micLabel = (s.mics.find((m) => m.deviceId === s.micDeviceId) || {}).label || 'Default microphone';
     const camLabel = (s.cams.find((cm) => cm.deviceId === s.camDeviceId) || {}).label || (s.cams[0] ? s.cams[0].label : 'Default camera');
     const micSub = s.micOn ? micLabel : 'Muted';
     const camSub = s.mode === 'camera' ? 'Recording source in this mode' : (s.camOn ? camLabel : 'Off');
-    const qualityLabel = s.quality === 'fast' ? 'Fast' : s.quality === 'small' ? 'Smaller file' : 'Balanced';
+    const qualityLabel = s.quality === 'small' ? 'Smaller file' : 'Instant save';
 
     return e('div', { className: 'panel-fit' + (s.flow === 'recording' || s.flow === 'paused' ? ' dim-setup' : '') },
       pop ? e('div', { className: 'pop-scrim', onClick: () => setPop(null) }) : null,
@@ -164,7 +199,7 @@
       e(Sec, { title: 'Output' },
         e(DevRow, {
           icon: 'film',
-          title: (s.format === 'mp4' ? 'MP4' : 'WebM') + ' · ' + qualityLabel,
+          title: s.format === 'mp4' ? 'MP4 · ' + qualityLabel : 'WebM',
           sub: s.folder,
           noToggle: true,
           open: pop === 'output', onOpen: () => toggle('output'), dir: 'up',
@@ -174,17 +209,17 @@
               e('div', { className: 'field-lbl' }, 'Format'),
               e(Seg, { value: s.format, onChange: (v) => set({ format: v }), options: [{ v: 'mp4', label: 'MP4' }, { v: 'webm', label: 'WebM' }] }),
             ),
-            e('div', null,
-              e('div', { className: 'field-lbl' }, 'Quality'),
+            s.format === 'mp4' ? e('div', null,
+              e('div', { className: 'field-lbl' }, 'After recording'),
               e(Seg, {
-                value: s.quality, onChange: (v) => set({ quality: v }),
-                options: [{ v: 'fast', label: 'Fast' }, { v: 'balanced', label: 'Balanced' }, { v: 'small', label: 'Smaller' }],
+                value: s.quality === 'small' ? 'small' : 'balanced', onChange: (v) => set({ quality: v }),
+                options: [{ v: 'balanced', label: 'Instant save' }, { v: 'small', label: 'Smaller file' }],
               }),
               e('div', { className: 'field-note', style: { marginTop: 6 } },
-                s.quality === 'fast' ? 'Quickest to save · larger file.' :
-                s.quality === 'small' ? 'Slower to save · smallest file.' :
-                'Recommended: good quality, reasonable size.'),
-            ),
+                s.quality === 'small'
+                  ? 'Compresses the video after you stop. Slower to save, smallest file.'
+                  : 'Recommended. The recording is ready the moment you stop.'),
+            ) : null,
             e('div', null,
               e('div', { className: 'field-lbl' }, 'Save to'),
               e('div', { className: 'folder' },
@@ -196,7 +231,8 @@
             e(PopRow, { title: '3-2-1 countdown', sub: 'Before recording starts', on: s.countdownOn, onChange: (v) => set({ countdownOn: v }) }),
             e('div', { className: 'pop-div' }),
             e('div', { className: 'pop-title', style: { color: 'var(--muted)' } }, 'Advanced'),
-            e(PopRow, { title: 'Hardware encoding', sub: 'Beta · saves instantly, but a crash loses the recording', on: s.hwEncode, onChange: (v) => set({ hwEncode: v }) }),
+            e(PopRow, { title: 'Hide while recording', sub: 'Full screen only. Stop from the menu bar', on: s.hideOnRecord, onChange: (v) => set({ hideOnRecord: v }) }),
+            e(PopRow, { title: 'Global shortcuts', sub: (s.toggleKeys || '') + ' start or stop · ' + (s.pauseKeys || '') + ' pause', on: s.globalShortcutsOn, onChange: (v) => set({ globalShortcutsOn: v }) }),
             e(PopRow, { title: 'Floating controls', sub: 'Mini control bar while recording', on: s.floatingOn, onChange: (v) => set({ floatingOn: v }) }),
           ),
         }),
@@ -231,9 +267,41 @@
                   'Using iCloud Drive or Google Drive instead? Set "Save to" (above) to a synced folder; the file syncs automatically and you copy its link from Finder.'),
               ),
         }),
+        e(DevRow, {
+          icon: 'sparkle', title: 'Agent access',
+          sub: s.agentFilesOn ? 'Transcript and key frames' : 'Off',
+          on: s.agentFilesOn,
+          onToggle: (v) => {
+            set({ agentFilesOn: v });
+            // Switching it on without a speech model: show the offer.
+            if (v && agent && agent.engine && !agent.transcripts) setPop('agent');
+          },
+          open: pop === 'agent', onOpen: () => toggle('agent'), dir: 'up',
+          popover: e(React.Fragment, null,
+            e('div', { className: 'pop-title' }, 'Agent access'),
+            e('div', { className: 'field-note' },
+              'After each save, MyScreen writes a transcript of your narration and an image of every screen change next to the recording, so Claude Code and Codex can follow what you showed and said.'),
+            agent && agent.transcripts ? e('div', { className: 'field-note' },
+              'Transcripts are made on this Mac with ', e('strong', null, agent.engineLabel), '.') : null,
+            agent && !agent.transcripts && agent.engine ? e(React.Fragment, null,
+              e('div', { className: 'field-note' },
+                e('strong', null, 'Transcripts need a speech model. '),
+                'It is a one-time download and runs on this Mac, so your recordings are never uploaded. Key frames work without it.'),
+              e(ModelDownload, { s, actions }),
+            ) : null,
+            agent && !agent.engine ? e('div', { className: 'field-note' },
+              e('strong', null, 'No transcripts: '), agent.engineLabel, ' from this copy of MyScreen. Key frames still work.') : null,
+            e('div', { className: 'pop-div' }),
+            e('div', { className: 'field-lbl' }, 'Connect an agent'),
+            e('div', { className: 'field-note' }, 'Run one command once. The agent can then list, read, and search your recordings.'),
+            e(CopyAction, { icon: 'copy', label: 'Copy command for Claude Code', onCopy: () => actions.copyAgentCommand('claude') }),
+            e(CopyAction, { icon: 'copy', label: 'Copy command for Codex', onCopy: () => actions.copyAgentCommand('codex') }),
+          ),
+        }),
       ),
     );
   }
 
   window.SetupPanel = SetupPanel;
+  window.ModelDownload = ModelDownload;
 })();

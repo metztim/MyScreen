@@ -4,8 +4,8 @@
    Usage:
      1. Put content assets in /tmp/myscreen-shoot/: repo-page.png (fake screen content),
         tim-avatar.png (camera bubble content; any square JPEG works).
-     2. BACK UP ~/Library/Application Support/myscreen-v2/settings.json (dev shares
-        userData with the packaged app; UI state changes persist). Restore it after.
+     2. Development runs keep their own profile (myscreen-v2-dev), so the installed
+        app's settings are not touched.
      3. npx electron . --remote-debugging-port=9223
      4. node test/marketing-screenshots.js   -> scenes saved to /tmp/myscreen-shoot/
 

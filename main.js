@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, desktopCapturer, systemPreferences, shell, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, desktopCapturer, systemPreferences, shell, Menu, Tray, globalShortcut, nativeImage } = require('electron');
 const path = require('path');
 const os = require('os');
 const fsSync = require('fs');
@@ -11,13 +11,26 @@ const RecordingWriter = require('./recording-writer');
 const SettingsStore = require('./settings-store');
 const LibraryStore = require('./library-store');
 const DropboxShare = require('./dropbox-share');
+const { RecordingControls } = require('./tray-controls');
+const AgentFiles = require('./agent-files');
+const { SpeechModel } = require('./model-download');
 
 let mainWindow;
 let isQuitting = false;
 let recordingWriter; // stream-to-disk writer, constructed once app paths are available
+let recordingControls = null; // menu bar item + global shortcuts + window hiding
+let agentFiles = null;        // transcript + key frames per recording, for coding agents
+let speechModel = null;       // the downloadable model the transcripts need
 
 const activeChildProcesses = new Set(); // Track FFmpeg processes for cleanup
 const activePartFiles = new Set();      // Half-written outputs to remove if we quit mid-save
+
+// Development runs keep their own profile, so they never touch the installed
+// app's settings or unsaved recordings and can run beside it. An explicit
+// --user-data-dir (test harness) still wins.
+if (!app.isPackaged && !app.commandLine.hasSwitch('user-data-dir')) {
+  app.setPath('userData', path.join(app.getPath('appData'), 'myscreen-v2-dev'));
+}
 
 // Two instances would share userData: the second one would see the first
 // one's live recording as an orphan and could discard it. Allow only one.
@@ -70,19 +83,24 @@ function createWindow() {
   mainWindow.loadFile('index.html');
 
   mainWindow.once('ready-to-show', () => {
+    // Started by macOS at login: stay in the menu bar until asked for.
+    if (app.isPackaged && app.getLoginItemSettings().wasOpenedAtLogin) return;
     mainWindow.show();
   });
 
+  // Closing the window keeps MyScreen in the menu bar, where a recording can
+  // be started (or one in progress stopped). Quitting is Cmd+Q or the menu.
   mainWindow.on('close', (event) => {
     if (isQuitting) return;
     event.preventDefault();
-    // The renderer stops any recording and answers with 'confirm-quit'. If it
-    // cannot answer (crashed or hung), quit anyway instead of leaving a
-    // window that never closes.
-    const asked = safeSend(mainWindow, 'app-closing');
-    clearTimeout(closeFallbackTimer);
-    closeFallbackTimer = setTimeout(forceQuit, asked ? CLOSE_FALLBACK_MS : 0);
+    if (!quitRequested) mainWindow.hide();
   });
+
+  // A window nobody can see (closed to the menu bar, minimized, or on macOS
+  // fully covered by other windows) must not keep the screen or camera open
+  // for its preview; the renderer drops and restores them on these.
+  for (const gone of ['hide', 'minimize']) mainWindow.on(gone, () => safeSend(mainWindow, 'window:visibility', false));
+  for (const back of ['show', 'restore']) mainWindow.on(back, () => safeSend(mainWindow, 'window:visibility', true));
 
   // A reload or a renderer crash ends whatever recording that renderer was
   // feeding. Close those files so they show up as recoverable right away.
@@ -106,6 +124,18 @@ function createWindow() {
 
 const CLOSE_FALLBACK_MS = 6000; // the renderer allows itself 4s to finalize
 let closeFallbackTimer = null;
+let quitRequested = false;
+
+// Quit with a recording still open: the renderer stops and finalizes it,
+// then answers with 'confirm-quit'. If it cannot answer (crashed or hung),
+// quit anyway instead of hanging.
+function requestQuit() {
+  if (isQuitting || quitRequested) return;
+  quitRequested = true;
+  const asked = safeSend(mainWindow, 'app-closing');
+  clearTimeout(closeFallbackTimer);
+  closeFallbackTimer = setTimeout(forceQuit, asked ? CLOSE_FALLBACK_MS : 0);
+}
 
 async function releaseOpenRecordings() {
   if (!recordingWriter) return;
@@ -140,6 +170,8 @@ function buildAppMenu() {
           },
         },
         { type: 'separator' },
+        { label: 'Start or Stop Recording', click: () => safeSend(mainWindow, 'controls:command', 'toggle') },
+        { type: 'separator' },
         { role: 'close' },
       ],
     },
@@ -172,8 +204,15 @@ const SETTINGS_DEFAULTS = {
   micOn: true,
   micDeviceId: '',
   countdownOn: true,
-  hwEncode: false,
   floatingOn: true,
+  // Controls outside the window (tray-controls.js).
+  hideOnRecord: true,                    // hide the window while the full screen is recorded
+  globalShortcutsOn: true,
+  shortcutToggle: 'Control+Shift+R',     // start, or stop and save
+  shortcutPause: 'Control+Shift+P',      // only registered while recording
+  // After each save, write a transcript, key frames, and a summary next to
+  // the recording for coding agents (agent-files.js, mcp-server.js).
+  agentFilesOn: true,
   // Dropbox link sharing. The app key is a public PKCE client identifier
   // (no secret) for the "MyScreen Recorder" Dropbox app; safe to ship.
   shareLink: false,
@@ -202,7 +241,15 @@ ipcMain.handle('settings:get', () => rendererSettings(settingsStore.get()));
 ipcMain.handle('settings:set', (event, patch) => {
   const clean = { ...(patch || {}) };
   for (const key of MAIN_ONLY_SETTINGS) delete clean[key];
-  return rendererSettings(settingsStore.set(clean));
+  const settings = settingsStore.set(clean);
+  if (recordingControls) recordingControls.applySettings();
+  return rendererSettings(settings);
+});
+
+// The renderer reports where the recording stands after every change; the
+// menu bar item, shortcuts, and window visibility follow.
+ipcMain.on('recording:status', (event, status) => {
+  if (recordingControls && status && typeof status === 'object') recordingControls.update(status);
 });
 
 // Make sure the configured save folder exists; returns its absolute path.
@@ -248,6 +295,77 @@ ipcMain.handle('library:meta-for', async (event, filePath) => {
   } catch {
     return null;
   }
+});
+
+// --- agent files + MCP server ---
+
+// Prepare the agent files for a saved recording in the background and tell
+// the renderer how it went. Never blocks or fails the save.
+function queueAgentFiles(filePath, context, { force = false } = {}) {
+  if (!agentFiles || !(force || settingsStore.get().agentFilesOn)) return;
+  safeSend(mainWindow, 'agent:status', { path: filePath, state: 'working' });
+  agentFiles.ensure(filePath, context).then((manifest) => {
+    safeSend(mainWindow, 'agent:status', {
+      path: filePath, state: 'ready',
+      summaryPath: agentFiles.summaryPathFor(filePath),
+      transcript: manifest.transcript.status,
+      frames: manifest.frames.length,
+    });
+  }).catch((err) => {
+    console.error('Agent files failed:', err);
+    safeSend(mainWindow, 'agent:status', { path: filePath, state: 'failed', detail: err.message });
+  });
+}
+
+// What was being recorded, from the sidecar written at start.
+async function readRecordingContext(recordingId) {
+  try {
+    const meta = JSON.parse(await fs.readFile(recordingWriter.sidecarPathFor(recordingId), 'utf-8'));
+    return meta.context || null;
+  } catch {
+    return null;
+  }
+}
+
+// The command an agent uses to start the MCP server: this app's own binary
+// in Node mode running mcp-server.js, so nothing else needs installing.
+function mcpServerCommands() {
+  const quote = (value) => `"${value}"`;
+  // The script is unpacked from the archive (asarUnpack) so it runs as a plain file.
+  const script = path.join(app.getAppPath().replace(/app\.asar(?!\.unpacked)/, 'app.asar.unpacked'), 'mcp-server.js');
+  const parts = [quote(process.execPath), quote(script)];
+  if (!app.isPackaged) parts.push('--user-data-dir', quote(app.getPath('userData')));
+  const command = parts.join(' ');
+  return {
+    claude: `claude mcp add -s user myscreen -e ELECTRON_RUN_AS_NODE=1 -- ${command}`,
+    codex: `codex mcp add myscreen --env ELECTRON_RUN_AS_NODE=1 -- ${command}`,
+  };
+}
+
+ipcMain.handle('agent:info', async () => {
+  const engine = await agentFiles.transcriber();
+  return {
+    transcripts: engine.available,   // engine and a model are both present
+    engine: !!engine.binary,
+    engineLabel: engine.label,
+    model: await speechModel.status(),
+    commands: mcpServerCommands(),
+  };
+});
+
+// One-time download of the speech model. Progress goes to the renderer as
+// 'model:progress' events; the call itself returns at once.
+ipcMain.handle('model:download', () => {
+  speechModel.start((event) => safeSend(mainWindow, 'model:progress', event));
+  return { started: true };
+});
+
+ipcMain.handle('model:cancel', () => { speechModel.cancel(); });
+
+// (Re)build the agent files for one recording, e.g. to add the transcript
+// once a model has been downloaded.
+ipcMain.handle('agent:ensure', (event, filePath) => {
+  if (typeof filePath === 'string' && filePath) queueAgentFiles(filePath, null, { force: true });
 });
 
 // --- Dropbox link sharing ---
@@ -344,6 +462,12 @@ app.whenReady().then(async () => {
     cacheDir: path.join(app.getPath('userData'), 'thumbnails'),
   });
 
+  agentFiles = new AgentFiles({
+    ffmpegPath: ffmpeg,
+    modelDirs: AgentFiles.defaultModelDirs(app.getPath('userData')),
+  });
+  speechModel = new SpeechModel({ dir: path.join(app.getPath('userData'), 'models') });
+
   dropboxShare = new DropboxShare({
     settings: settingsStore,
     openExternal: (url) => shell.openExternal(url),
@@ -352,9 +476,34 @@ app.whenReady().then(async () => {
   buildAppMenu();
   createWindow();
 
+  const trayIcon = (name) => nativeImage.createFromPath(path.join(__dirname, 'assets', `${name}.png`));
+  recordingControls = new RecordingControls({
+    Tray, Menu, globalShortcut,
+    icons: { idle: trayIcon('trayTemplate'), recording: trayIcon('trayRecording') },
+    getWindow: () => mainWindow,
+    getSettings: () => settingsStore.get(),
+    sendCommand: (command) => safeSend(mainWindow, 'controls:command', command),
+    quit: () => app.quit(),
+    focusApp: () => app.focus({ steal: true }),
+    openRecordingsFolder: async () => {
+      const folder = settingsStore.get().folder;
+      await fs.mkdir(folder, { recursive: true }).catch(() => {});
+      shell.openPath(folder);
+    },
+    // Registering a login item only makes sense for the installed app.
+    loginItem: {
+      available: app.isPackaged,
+      get: () => app.getLoginItemSettings().openAtLogin,
+      set: (openAtLogin) => app.setLoginItemSettings({ openAtLogin }),
+    },
+  });
+  recordingControls.start();
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
+    } else if (recordingControls) {
+      recordingControls.showWindow(); // Dock click brings a hidden window back
     }
   });
 });
@@ -366,11 +515,10 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', (event) => {
-  // Cmd+Q with a recording still open: route through the window's close
-  // flow so the renderer stops and finalizes it first.
+  // Quit with a recording still open: let the renderer stop and finalize it first.
   if (!isQuitting && recordingWriter && recordingWriter.active.size > 0 && mainWindow && !mainWindow.isDestroyed()) {
     event.preventDefault();
-    mainWindow.close();
+    requestQuit();
     return;
   }
   isQuitting = true;
@@ -387,6 +535,8 @@ app.on('before-quit', (event) => {
     try { fsSync.rmSync(partPath, { force: true }); } catch { /* best effort */ }
   }
   activePartFiles.clear();
+  if (recordingControls) recordingControls.dispose();
+  if (speechModel) speechModel.cancel(); // the part file stays; the next attempt resumes
 });
 
 ipcMain.handle('get-sources', async () => {
@@ -601,8 +751,20 @@ function convertWebMToMP4(inputPath, outputPath, quality = 'balanced', durationS
 // Shared by a normal save and by crash recovery: turn the raw recording at
 // `srcPath` into the file the user asked for at `destPath`. Each step falls
 // back to a simpler one, so a recording is never lost to a failed
-// conversion: MP4 encode -> repaired WebM -> the raw file as recorded.
-async function exportRecording({ srcPath, destPath, convert, quality, durationSeconds, statusText }) {
+// conversion: video copy -> MP4 encode -> repaired WebM -> the raw file as
+// recorded. `copyVideo` is for H.264 recordings: the picture is copied into
+// the MP4 untouched and only the audio is converted, which takes moments.
+async function exportRecording({ srcPath, destPath, convert, copyVideo, quality, durationSeconds, statusText }) {
+  if (copyVideo) {
+    try {
+      await writeAtomically(destPath, (partPath) => remuxContainer(srcPath, partPath, { audioCodec: 'aac' }));
+      return { filePath: destPath };
+    } catch (err) {
+      console.error('Video copy failed, re-encoding instead:', err);
+      convert = true;
+    }
+  }
+
   if (convert) {
     safeSend(mainWindow, 'conversion-status', statusText || 'Converting to MP4...');
     safeSend(mainWindow, 'conversion-start');
@@ -643,9 +805,9 @@ async function exportContainerCopy(srcPath, destPath) {
 // One MediaRecorder in the renderer streams its timeslice chunks here; they are
 // appended in order to a single file. start -> chunk* -> finalize -> save.
 
-ipcMain.handle('recording:start', async (event, { recordingId, mimeType, suggestedName }) => {
+ipcMain.handle('recording:start', async (event, { recordingId, mimeType, suggestedName, context }) => {
   const id = sanitizeRecordingId(recordingId);
-  await recordingWriter.start({ recordingId: id, mimeType, suggestedName });
+  await recordingWriter.start({ recordingId: id, mimeType, suggestedName, context });
   return { success: true, recordingId: id };
 });
 
@@ -670,7 +832,7 @@ ipcMain.handle('recording:abort', async (event, recordingId) => {
 // Export the finalized recording to the user's save folder. `convert` is set
 // by the renderer when a WebM recording is being saved as MP4 (a direct-H.264
 // recording saved as .mp4 only needs a container copy).
-ipcMain.handle('recording:save', async (event, { recordingId, destPath, convert, quality, durationSeconds }) => {
+ipcMain.handle('recording:save', async (event, { recordingId, destPath, convert, copyVideo, quality, durationSeconds }) => {
   const id = sanitizeRecordingId(recordingId);
   const srcPath = recordingWriter.filePathFor(id);
 
@@ -680,8 +842,10 @@ ipcMain.handle('recording:save', async (event, { recordingId, destPath, convert,
     throw new Error('Recording file not found. It may have already been saved or discarded.');
   }
 
-  const result = await exportRecording({ srcPath, destPath, convert, quality, durationSeconds });
+  const context = await readRecordingContext(id);
+  const result = await exportRecording({ srcPath, destPath, convert, copyVideo, quality, durationSeconds });
   await recordingWriter.discard(id);
+  queueAgentFiles(result.filePath, context);
   return { success: true, ...result };
 });
 
@@ -690,10 +854,13 @@ ipcMain.handle('recording:save', async (event, { recordingId, destPath, convert,
 // sidecar. We repair the container with a remux pass (rewrites duration/cues so
 // it seeks correctly) before saving it where the user wants.
 
-function remuxContainer(inputPath, outputPath) {
+// Stream-copy into a fresh container. `audioCodec` converts just the audio
+// (Opus from the recorder becomes AAC, which every MP4 player handles).
+function remuxContainer(inputPath, outputPath, { audioCodec } = {}) {
   return new Promise((resolve, reject) => {
     const format = path.extname(outputPath).toLowerCase() === '.mp4' ? 'mp4' : 'webm';
     const args = ['-y', '-i', inputPath, '-c', 'copy'];
+    if (audioCodec) args.push('-c:a', audioCodec, '-b:a', '192k');
     if (format === 'mp4') args.push('-movflags', '+faststart');
     args.push('-f', format, outputPath);
     const proc = spawn(ffmpeg, args);
@@ -728,7 +895,7 @@ ipcMain.handle('recording:discard', async (event, recordingId) => {
   return { success: true };
 });
 
-ipcMain.handle('recording:recover', async (event, { recordingId, destPath, convert, quality }) => {
+ipcMain.handle('recording:recover', async (event, { recordingId, destPath, convert, copyVideo, quality }) => {
   const id = sanitizeRecordingId(recordingId);
   const srcPath = recordingWriter.filePathFor(id);
   let stat;
@@ -747,10 +914,12 @@ ipcMain.handle('recording:recover', async (event, { recordingId, destPath, conve
   } catch { /* progress stays indeterminate */ }
 
   const result = await exportRecording({
-    srcPath, destPath, convert, quality, durationSeconds,
+    srcPath, destPath, convert, copyVideo, quality, durationSeconds,
     statusText: 'Recovering and converting to MP4...',
   });
+  const context = await readRecordingContext(id);
   await recordingWriter.discard(id);
+  queueAgentFiles(result.filePath, context);
   return { success: true, ...result };
 });
 

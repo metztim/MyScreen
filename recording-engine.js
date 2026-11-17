@@ -33,6 +33,17 @@ const DEFAULT_OVERLAY = Object.freeze({ x: 80.5, y: 2.7, w: 0.18, shape: 'rounde
 const DEFAULT_BITRATE = 2_500_000;
 const DEFAULT_TIMESLICE_MS = 1000;
 
+// Target bits per second per captured pixel, with a floor and a ceiling. The
+// encoders are variable-rate, so a mostly still screen uses far less; the
+// target is what keeps scrolling text sharp. H.264 needs more bits than VP9
+// for the same picture.
+const BITRATE_RULES = Object.freeze({
+  h264: { perPixel: 2.4, min: 4_000_000, max: 20_000_000 },
+  vp9: { perPixel: 1.2, min: 2_500_000, max: 10_000_000 },
+});
+
+function isH264(mimeType) { return /h264|avc1/i.test(mimeType || ''); }
+
 class RecordingEngine {
   constructor(deps = {}) {
     // Injectable for testing; default to the renderer globals.
@@ -133,18 +144,27 @@ class RecordingEngine {
       if (!stream || stream.getVideoTracks().length === 0) {
         throw new Error('No video track was captured from the selected source.');
       }
-      const mimeType = this.chooseMimeType(options);
-
-      const recorder = new this.MediaRecorder(stream, {
-        mimeType,
-        videoBitsPerSecond: options.videoBitsPerSecond || DEFAULT_BITRATE,
-      });
+      let mimeType = this.chooseMimeType(options);
+      let recorder;
+      try {
+        recorder = this._createRecorder(stream, mimeType, options);
+      } catch (err) {
+        // No usable H.264 encoder for this capture: record VP9 instead (the
+        // save then re-encodes to MP4, slower but equivalent).
+        if (!isH264(mimeType)) throw err;
+        mimeType = this.chooseMimeType({ ...options, preferH264: false });
+        recorder = this._createRecorder(stream, mimeType, options);
+      }
 
       this._recorder = recorder;
       this._recordingId = recordingId;
       this._mimeType = mimeType;
 
-      await this.api.recordingStart({ recordingId, mimeType, suggestedName: options.suggestedName || null });
+      await this.api.recordingStart({
+        recordingId, mimeType,
+        suggestedName: options.suggestedName || null,
+        context: options.context || null,
+      });
 
       this._attachRecorder(recorder);
       this._startTime = this.now();
@@ -211,6 +231,23 @@ class RecordingEngine {
       this._reset();
       this._setState(STATES.IDLE);
     }
+  }
+
+  _createRecorder(stream, mimeType, options) {
+    return new this.MediaRecorder(stream, {
+      mimeType,
+      videoBitsPerSecond: options.videoBitsPerSecond || this.bitrateFor(stream, mimeType),
+    });
+  }
+
+  // Bitrate scaled to the size of the picture being recorded.
+  bitrateFor(stream, mimeType) {
+    const track = stream && stream.getVideoTracks()[0];
+    const settings = track && track.getSettings ? track.getSettings() : null;
+    if (!settings || !settings.width || !settings.height) return DEFAULT_BITRATE;
+    const rule = isH264(mimeType) ? BITRATE_RULES.h264 : BITRATE_RULES.vp9;
+    const target = Math.round(settings.width * settings.height * rule.perPixel);
+    return Math.min(rule.max, Math.max(rule.min, target));
   }
 
   _attachRecorder(recorder) {
@@ -519,13 +556,15 @@ class RecordingEngine {
     const MR = this.MediaRecorder;
     const supported = (t) => !MR.isTypeSupported || MR.isTypeSupported(t);
 
+    // H.264 goes into a WebM container, never straight to MP4: WebM reaches
+    // the disk chunk by chunk (crash recovery depends on that), while the
+    // MP4 muxer holds everything until stop. Saving as MP4 is then a copy.
     if (preferH264) {
-      const mp4 = [
-        'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
-        'video/mp4;codecs=avc1,mp4a.40.2',
-        'video/mp4',
+      const h264 = [
+        'video/webm;codecs=avc1.640033,opus', // High profile: smaller for the same picture
+        'video/webm;codecs=h264,opus',
       ];
-      for (const t of mp4) if (supported(t)) return t;
+      for (const t of h264) if (supported(t)) return t;
     }
 
     const webm = [
@@ -540,6 +579,7 @@ class RecordingEngine {
 }
 
 RecordingEngine.STATES = STATES;
+RecordingEngine.isH264 = isH264;
 
 // Export for both the renderer (script tag / window) and node tests (module.exports).
 if (typeof module !== 'undefined' && module.exports) {

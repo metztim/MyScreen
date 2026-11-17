@@ -25,7 +25,11 @@
     dropbox: { connected: false, account: '', appKeySet: false },
     shareState: 'none', shareUrl: '', shareProgress: 0, sharePath: '',
     countdownOn: true,
-    hwEncode: false, floatingOn: true,
+    floatingOn: true,
+    hideOnRecord: true, globalShortcutsOn: true, toggleKeys: '', pauseKeys: '',
+    agentFilesOn: true, agentInfo: null,
+    agentFor: '', agentState: 'off', agentSummaryPath: '', agentTranscript: '',
+    modelDl: { state: 'idle', percent: 0, detail: '' },   // speech model download
     countdownN: 3,
     elapsed: 0, lastDuration: 0,
     saveProgress: 0, saveEta: '',
@@ -40,7 +44,8 @@
 
   // settings persisted across sessions (must exist in main.js SETTINGS_DEFAULTS)
   const PERSISTED = ['format', 'quality', 'camOn', 'camDeviceId', 'camMirror', 'camShape',
-    'camX', 'camY', 'camW', 'micOn', 'micDeviceId', 'countdownOn', 'hwEncode', 'floatingOn',
+    'camX', 'camY', 'camW', 'micOn', 'micDeviceId', 'countdownOn', 'floatingOn',
+    'hideOnRecord', 'globalShortcutsOn', 'agentFilesOn',
     'shareLink'];
 
   function fmt(sec) {
@@ -103,11 +108,18 @@
       set({ flow: 'picker', pickerPendingMode: pendingMode || null });
       c.refreshSources();
     }
-    function closePicker() { set({ flow: 'ready', pickerPendingMode: null }); }
+    function closePicker() { set({ flow: 'ready', pickerPendingMode: null, pickerAutoStart: false }); }
     function confirmPicker(item) {
       if (!item) return;
-      if (item.kind === 'screen') set({ screenSource: item, mode: 'screen', flow: 'ready', pickerPendingMode: null });
-      else set({ windowSource: item, mode: 'window', flow: 'ready', pickerPendingMode: null });
+      // Opened from the menu bar ("Record a Window…"): choosing starts the recording.
+      const autoStart = sRef.current.pickerAutoStart;
+      if (item.kind === 'screen') {
+        set({ screenSource: item, mode: 'screen', flow: 'ready', pickerPendingMode: null, pickerAutoStart: false });
+        if (autoStart) c.startRecording({ mode: 'screen', screenSource: item });
+      } else {
+        set({ windowSource: item, mode: 'window', flow: 'ready', pickerPendingMode: null, pickerAutoStart: false });
+        if (autoStart) c.startRecording({ mode: 'window', windowSource: item });
+      }
     }
     function editOverlay() {
       if (!sRef.current.overlayEditable) return;
@@ -146,8 +158,16 @@
       disconnectDropbox: () => c.disconnectDropbox(),
       retryShare: () => c.retryShare(),
       copyShareUrl: () => c.copyShareUrl(),
+      copyAgentPath: () => c.copyAgentPath(),
+      copyAgentCommand: (which) => c.copyAgentCommand(which),
+      refreshAgentInfo: () => c.refreshAgentInfo(),
+      downloadModel: () => c.downloadModel(),
+      cancelModelDownload: () => c.cancelModelDownload(),
       toast, fmt,
     };
+
+    // keep the menu bar item, shortcuts, and window visibility in step
+    useEffect(() => { c.reportStatus(); }, [s.flow, s.elapsed, s.countdownN, s.mode]);
 
     // refresh the library whenever it comes into view
     useEffect(() => { if (s.view === 'library') c.loadLibrary(); }, [s.view]);
@@ -184,7 +204,12 @@
           bits.push(s.micOn ? 'mic' : 'no mic');
           bits.push(s.format === 'mp4' ? 'MP4' : 'WebM');
           if (s.shareLink && s.dropbox.connected) bits.push('share link');
-          return { led: 'ok', t: 'Ready to record', sub: 'Will capture ' + bits.join(' · ') };
+          // The window is about to disappear: say how to stop.
+          const hides = s.mode === 'screen' && s.hideOnRecord;
+          const stopHint = hides
+            ? '. MyScreen hides while recording: stop from the menu bar' + (s.globalShortcutsOn && s.toggleKeys ? ' or with ' + s.toggleKeys : '')
+            : '';
+          return { led: 'ok', t: 'Ready to record', sub: 'Will capture ' + bits.join(' · ') + stopHint };
         }
       }
     })();
@@ -242,7 +267,7 @@
           )
         : s.flow === 'stopping'
           ? e('button', { className: 'btn btn-stop', disabled: true }, 'Finishing…')
-          : e('button', { className: 'btn btn-rec', disabled: s.flow === 'countdown', onClick: actions.startRecording, title: 'Start recording (Space)' }, e('span', { className: 'rec-dot' }), 'Start recording'),
+          : e('button', { className: 'btn btn-rec', disabled: s.flow === 'countdown', onClick: actions.startRecording, title: 'Start recording (Space' + (s.globalShortcutsOn && s.toggleKeys ? ', or ' + s.toggleKeys + ' from any app' : '') + ')' }, e('span', { className: 'rec-dot' }), 'Start recording'),
     );
   }
 

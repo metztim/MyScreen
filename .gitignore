@@ -19,3 +19,7 @@ out/
 *.code-workspace
 build/
 .claude/settings.local.json
+
+# Transcription engine: source checkout and the binary built from it (scripts/build-whisper.sh)
+.cache/
+vendor-bin/

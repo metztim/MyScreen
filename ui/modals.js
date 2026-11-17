@@ -229,7 +229,7 @@
         e('div', { className: 'sheet-head' },
           e('div', null,
             e('div', { className: 'h' }, 'Saving your recording'),
-            e('div', { className: 'sub' }, s.format === 'mp4' ? 'Converting to MP4. Longer recordings take a little while.' : 'Finishing up.'),
+            e('div', { className: 'sub' }, s.saveEncoding ? 'Compressing to MP4. Longer recordings take a little while.' : 'Finishing up.'),
           ),
         ),
         e('div', { className: 'sheet-body' },
@@ -279,6 +279,44 @@
     );
   }
 
+  // Agent files for the recording that was just saved.
+  function SavedAgentBox({ s, actions }) {
+    const [copied, setCopied] = useState(false);
+    if (s.agentFor !== s.lastFilePath || s.agentState === 'off') return null;
+    if (s.agentState === 'working') {
+      return e('div', { className: 'share-box' },
+        e(Icon, { name: 'sparkle', size: 15, style: { color: 'var(--muted)', flex: '0 0 auto' } }),
+        e('span', { className: 'url plain' }, 'Preparing transcript and key frames for agents…'),
+      );
+    }
+    if (s.agentState === 'failed') {
+      return e('div', { className: 'share-box' },
+        e(Icon, { name: 'alert', size: 15, style: { color: 'var(--orange)', flex: '0 0 auto' } }),
+        e('span', { className: 'url plain' }, 'Could not prepare the files for agents.'),
+      );
+    }
+    const note = s.agentTranscript === 'ok' ? 'Transcript and key frames ready'
+      : s.agentTranscript === 'no-audio' ? 'Key frames ready (no sound to transcribe)'
+        : 'Key frames ready (no transcript)';
+    // No speech model yet: this is the moment the transcript is missed.
+    const offerModel = s.agentTranscript === 'no-engine' && s.agentInfo && s.agentInfo.engine && !s.agentInfo.transcripts;
+    return e(React.Fragment, null,
+      e('div', { className: 'share-box' },
+        e(Icon, { name: 'sparkle', size: 15, style: { color: 'var(--blue)', flex: '0 0 auto' } }),
+        e('span', { className: 'url plain' }, note),
+        e('button', {
+          className: 'share-copy' + (copied ? ' done' : ''),
+          title: 'Copies the path of the summary file. Paste it into Claude Code or Codex.',
+          onClick: async () => { if (await actions.copyAgentPath()) { setCopied(true); setTimeout(() => setCopied(false), 1800); } },
+        }, copied ? 'Copied!' : 'Copy for agent'),
+      ),
+      offerModel ? e('div', { className: 'model-offer' },
+        e('div', { className: 'field-note' }, 'Add a transcript of what you said: a one-time download that runs on this Mac.'),
+        e(window.ModelDownload, { s, actions }),
+      ) : null,
+    );
+  }
+
   function Saved({ s, actions }) {
     // The file on disk is the truth: a failed MP4 conversion saves a WebM.
     const savedFormat = /\.webm$/i.test(s.lastFileName || '') ? 'WebM' : 'MP4';
@@ -300,6 +338,7 @@
             ),
             e('div', { className: 'saved-name' }, s.lastFileName || ''),
             e(SavedShareBox, { s, actions }),
+            e(SavedAgentBox, { s, actions }),
           ),
         ),
         e('div', { className: 'sheet-foot' },

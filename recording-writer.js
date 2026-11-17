@@ -37,7 +37,9 @@ class RecordingWriter {
   }
 
   // Open a write stream + sidecar for a new recording.
-  async start({ recordingId, mimeType, suggestedName }) {
+  // `context` is free-form detail about what is being recorded (source,
+  // microphone, camera); it rides in the sidecar for whoever exports the file.
+  async start({ recordingId, mimeType, suggestedName, context }) {
     if (!recordingId) throw new Error('start requires a recordingId');
     if (this.active.has(recordingId)) {
       throw new Error(`Recording already active: ${recordingId}`);
@@ -50,6 +52,7 @@ class RecordingWriter {
       recordingId,
       mimeType: mimeType || 'video/webm',
       suggestedName: suggestedName || null,
+      context: context || null,
       status: 'recording',
       startedAt: Date.now(),
     };

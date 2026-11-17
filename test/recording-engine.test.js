@@ -357,3 +357,63 @@ test('a microphone that disconnects mid-recording raises a warning and the recor
 
   await fsp.rm(baseDir, { recursive: true, force: true });
 });
+
+test('MP4 recordings use H.264 in a WebM container, with a bitrate scaled to the picture', async () => {
+  const baseDir = await freshBaseDir();
+  const writer = new RecordingWriter({ baseDir });
+  class SizedTrack extends FakeTrack {
+    constructor(kind, width, height) { super(kind); this._size = { width, height }; }
+    getSettings() { return this._size; }
+  }
+  const sized = (width, height) => ({
+    getUserMedia: async () => new FakeMediaStream([new SizedTrack('video', width, height)]),
+  });
+  const engineFor = (mediaDevices) => new RecordingEngine({
+    api: makeApi(writer), MediaRecorder: FakeMediaRecorder, MediaStream: FakeMediaStream, mediaDevices, now: () => 1,
+  });
+  FakeMediaRecorder.instances = [];
+
+  // 5K: the per-pixel target exceeds the ceiling.
+  let engine = engineFor(sized(5120, 2880));
+  const { mimeType } = await engine.start({ source: { type: 'screen', id: 's' }, preferH264: true, recordingId: 'h264-5k' });
+  assert.strictEqual(mimeType, 'video/webm;codecs=avc1.640033,opus', 'never the MP4 container: it is not written chunk by chunk');
+  assert.strictEqual(RecordingEngine.isH264(mimeType), true);
+  assert.strictEqual(FakeMediaRecorder.instances.at(-1).opts.videoBitsPerSecond, 20_000_000);
+  await engine.cancel();
+
+  // 1080p H.264 lands between floor and ceiling.
+  engine = engineFor(sized(1920, 1080));
+  await engine.start({ source: { type: 'screen', id: 's' }, preferH264: true, recordingId: 'h264-1080' });
+  assert.strictEqual(FakeMediaRecorder.instances.at(-1).opts.videoBitsPerSecond, Math.round(1920 * 1080 * 2.4));
+  await engine.cancel();
+
+  // WebM saves stay VP9, at VP9's lower rate.
+  engine = engineFor(sized(1920, 1080));
+  const vp9 = await engine.start({ source: { type: 'screen', id: 's' }, recordingId: 'vp9-1080' });
+  assert.strictEqual(vp9.mimeType, 'video/webm;codecs=vp9,opus');
+  assert.strictEqual(FakeMediaRecorder.instances.at(-1).opts.videoBitsPerSecond, 2_500_000);
+  await engine.cancel();
+
+  await fsp.rm(baseDir, { recursive: true, force: true });
+});
+
+test('falls back to VP9 when no H.264 encoder accepts the capture', async () => {
+  const baseDir = await freshBaseDir();
+  const writer = new RecordingWriter({ baseDir });
+  class NoH264Recorder extends FakeMediaRecorder {
+    constructor(stream, opts) {
+      if (RecordingEngine.isH264(opts.mimeType)) throw new Error('NotSupportedError');
+      super(stream, opts);
+    }
+  }
+  const engine = new RecordingEngine({
+    api: makeApi(writer), MediaRecorder: NoH264Recorder, MediaStream: FakeMediaStream, mediaDevices: fakeMediaDevices, now: () => 1,
+  });
+
+  const { mimeType } = await engine.start({ source: { type: 'screen', id: 's' }, preferH264: true, recordingId: 'h264-fallback' });
+  assert.strictEqual(mimeType, 'video/webm;codecs=vp9,opus');
+  assert.strictEqual(engine.state, 'recording');
+  await engine.cancel();
+
+  await fsp.rm(baseDir, { recursive: true, force: true });
+});

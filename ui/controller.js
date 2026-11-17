@@ -13,7 +13,29 @@
     return `${prefix} ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} at ${d.getHours()}.${pad(d.getMinutes())}.${pad(d.getSeconds())}`;
   }
 
-  function mapQuality(q) { return q === 'small' ? 'slow' : (q || 'balanced'); }
+  function mapQuality(q) { return q === 'small' ? 'slow' : 'balanced'; }
+
+  // 'Control+Shift+R' -> '⌃⇧R' (same mapping as tray-controls.js)
+  const KEY_SYMBOLS = { Control: '⌃', Ctrl: '⌃', Shift: '⇧', Alt: '⌥', Option: '⌥', Command: '⌘', Cmd: '⌘', CommandOrControl: '⌘', CmdOrCtrl: '⌘' };
+  function shortcutLabel(accelerator) {
+    return accelerator ? String(accelerator).split('+').map((k) => KEY_SYMBOLS[k] || k).join('') : '';
+  }
+
+  // How a finished recording becomes the file the user asked for.
+  //   copyVideo: H.264 recording -> MP4, picture copied as is (moments)
+  //   convert:   re-encode to MP4 (VP9 recordings, or the "Smaller file" option)
+  //   neither:   same container, repaired
+  // An H.264 recording always becomes an MP4, whatever the format setting
+  // says by the time it is saved (it may be a recovery).
+  function exportPlan(mimeType, format, quality) {
+    const mime = mimeType || '';
+    const isMp4 = mime.includes('mp4');
+    const isH264 = window.RecordingEngine.isH264(mime) && !isMp4;
+    const wantMp4 = format === 'mp4' || isH264;
+    const copyVideo = isH264 && quality !== 'small';
+    const convert = wantMp4 && !isMp4 && !copyVideo;
+    return { ext: (isMp4 || wantMp4) ? '.mp4' : '.webm', copyVideo, convert };
+  }
 
   // Errors that crossed the IPC bridge arrive wrapped ("Error invoking remote
   // method 'x': Error: ..."). Show only the part a person can use.
@@ -58,13 +80,17 @@
       try {
         const settings = await api.getSettings();
         this.set({
-          format: settings.format, quality: settings.quality,
+          // 'fast' was a preset of the old always-re-encode path
+          format: settings.format, quality: settings.quality === 'small' ? 'small' : 'balanced',
           camOn: settings.camOn, camDeviceId: settings.camDeviceId,
           camMirror: settings.camMirror, camShape: settings.camShape,
           camX: settings.camX, camY: settings.camY, camW: settings.camW,
           micOn: settings.micOn, micDeviceId: settings.micDeviceId,
-          countdownOn: settings.countdownOn, hwEncode: settings.hwEncode,
+          countdownOn: settings.countdownOn,
           floatingOn: settings.floatingOn,
+          hideOnRecord: settings.hideOnRecord, globalShortcutsOn: settings.globalShortcutsOn,
+          agentFilesOn: settings.agentFilesOn,
+          toggleKeys: shortcutLabel(settings.shortcutToggle), pauseKeys: shortcutLabel(settings.shortcutPause),
           folder: settings.folderDisplay, folderAbs: settings.folder,
           shareLink: settings.shareLink,
         });
@@ -73,6 +99,7 @@
       }
 
       await this.refreshDropboxStatus();
+      this.refreshAgentInfo();
 
       // Keep the device menus current when a mic or camera is plugged in or out.
       if (navigator.mediaDevices.addEventListener) {
@@ -88,6 +115,61 @@
 
     async persistSettings(patch) {
       try { await api.setSettings(patch); } catch { /* non-fatal */ }
+    }
+
+    // --- controls outside the window (menu bar item, global shortcuts) -----------
+
+    // Tell the main process where the recording stands. Sent on every change
+    // and once a second while recording, so the menu bar timer keeps time.
+    reportStatus() {
+      const s = this.get();
+      const phase = s.flow === 'recording' ? 'recording'
+        : s.flow === 'paused' ? 'paused'
+          : s.flow === 'countdown' ? 'countdown'
+            : s.flow === 'ready' ? 'ready'
+              : 'busy';
+      const status = { phase, elapsed: s.elapsed || 0, countdownN: s.countdownN || 0, mode: s.mode };
+      const key = JSON.stringify(status);
+      if (key === this._lastStatus) return;
+      this._lastStatus = key;
+      try { api.sendRecordingStatus(status); } catch { /* window is closing */ }
+    }
+
+    _onCommand(command) {
+      if (command === 'pause') { this.togglePause(); return; }
+      if (command === 'toggle' && this.engine.isRecording) { this.stop(); return; }
+      const s = this.get();
+      if (s.flow !== 'ready') return; // a sheet is open or a save is running
+      if (s.view !== 'recorder') this.set({ view: 'recorder' });
+
+      if (command === 'toggle') {
+        this.startRecording();
+      } else if (command === 'record-screen') {
+        if (!s.screenSource) { this.toast('No screen is available to record. Check the Screen Recording permission.', 'warn'); return; }
+        this.set({ mode: 'screen' });
+        this.startRecording({ mode: 'screen' });
+      } else if (command === 'record-camera') {
+        this.set({ mode: 'camera' });
+        this.startRecording({ mode: 'camera' });
+      } else if (command === 'record-window') {
+        // The picker starts the recording once a window is chosen.
+        this.set({ flow: 'picker', pickerPendingMode: 'window', pickerAutoStart: true });
+        this.refreshSources();
+      }
+    }
+
+    // The window was closed to the menu bar or brought back. While it is
+    // hidden and idle, nothing may hold the screen or camera open.
+    _onWindowVisibility(visible) {
+      this._windowHidden = !visible;
+      if (visible) {
+        this._restorePreviews();
+      } else if (!this._engineOwnsStage()) {
+        this._previewGen++; this._camGen++;
+        this._stopPreview();
+        this._stopCam();
+        this.set({ previewStream: null });
+      }
     }
 
     // --- devices & sources -----------------------------------------------------
@@ -140,7 +222,7 @@
     // Skipped while the engine owns the capture (recording/stopping).
     async syncPreview() {
       const s = this.get();
-      if (this._engineOwnsStage()) return;
+      if (this._engineOwnsStage() || this._windowHidden) return;
       // Calls overlap when the source changes quickly. Each one takes a
       // ticket; a call that is no longer the latest releases what it opened.
       const gen = ++this._previewGen;
@@ -187,7 +269,7 @@
     // Camera feed for the overlay bubble / camera-only stage.
     async syncCamera() {
       const s = this.get();
-      if (this._engineOwnsStage()) return;
+      if (this._engineOwnsStage() || this._windowHidden) return;
       const gen = ++this._camGen;
       const wantCam = s.mode === 'camera' || s.camOn;
 
@@ -248,9 +330,12 @@
 
     // --- recording flow ----------------------------------------------------------
 
-    startRecording() {
+    // `overrides` ({ mode, windowSource }) lets a menu bar command start a
+    // given kind of recording without waiting for the UI state to catch up.
+    startRecording(overrides = null) {
       const s = this.get();
-      if (s.flow !== 'ready' || this.engine.state !== 'idle') return;
+      if (!['ready', 'picker'].includes(s.flow) || this.engine.state !== 'idle') return;
+      this._startOverrides = overrides;
       if (s.countdownOn) {
         this.set({ flow: 'countdown', countdownN: 3 });
         this._countdownTimer = setInterval(() => {
@@ -274,7 +359,8 @@
     }
 
     async _begin() {
-      const s = this.get();
+      const s = { ...this.get(), ...(this._startOverrides || {}) };
+      this._startOverrides = null;
       const source = s.mode === 'camera'
         ? { type: 'camera', deviceId: s.camDeviceId || undefined, name: 'Camera' }
         : s.mode === 'screen'
@@ -312,7 +398,9 @@
           mic: s.micOn,
           micDeviceId: s.micDeviceId || undefined,
           systemAudio: false, // not supported on macOS; shown as info in the panel
-          preferH264: s.hwEncode,
+          preferH264: s.format === 'mp4', // WebM saves stay VP9
+          // carried to the agent files written after the save
+          context: { source: { type: source.type, name: source.name || null }, microphone: !!s.micOn, camera: !!cameraOverlay || source.type === 'camera' },
           suggestedName: `${generateName()}.webm`,
         });
       } catch (err) {
@@ -399,19 +487,16 @@
         return;
       }
 
-      const isMp4 = (mimeType || '').includes('mp4');
-      const wantMp4 = s.format === 'mp4';
-      const convert = wantMp4 && !isMp4;
-      const ext = (isMp4 || wantMp4) ? '.mp4' : '.webm';
+      const { ext, copyVideo, convert } = exportPlan(mimeType, s.format, s.quality);
       const destPath = `${folder}/${generateName()}${ext}`;
 
-      this.set({ flow: 'saving', saveProgress: convert ? 0 : 50, saveEta: '', lastDuration: Math.round((durationMs || 0) / 1000) });
+      this.set({ flow: 'saving', saveEncoding: convert, saveProgress: convert ? 0 : 50, saveEta: '', lastDuration: Math.round((durationMs || 0) / 1000) });
       this._conversionStart = null;
       this._restorePreviews(); // background: stage is hidden behind the sheet
 
       try {
         const result = await api.recordingSave({
-          recordingId, destPath, convert,
+          recordingId, destPath, convert, copyVideo,
           quality: mapQuality(s.quality),
           durationSeconds: durationMs ? durationMs / 1000 : 0,
         });
@@ -427,10 +512,13 @@
     }
 
     _showSaved(savedPath) {
-      this.set({
+      const patch = {
         flow: 'saved', saveProgress: 100,
         lastFileName: savedPath.split('/').pop(), lastFilePath: savedPath, lastThumbnail: null,
-      });
+      };
+      // The main process may already have reported on this file.
+      if ((this.get().agentFor || '') !== savedPath) Object.assign(patch, { agentFor: savedPath, agentState: this.get().agentFilesOn ? 'working' : 'off', agentSummaryPath: '' });
+      this.set(patch);
       this.maybeShare(savedPath);
       // Real thumbnail (and exact duration) for the Saved sheet.
       api.libraryMeta(savedPath).then((meta) => {
@@ -444,6 +532,74 @@
     openLastRecording() {
       const p = this.get().lastFilePath;
       if (p) api.libraryOpen(p);
+    }
+
+    // --- agent files + MCP server --------------------------------------------------------
+
+    async refreshAgentInfo() {
+      try {
+        const info = await api.agentInfo();
+        const patch = { agentInfo: info };
+        // A download that was already running when the window loaded.
+        if (info.model && info.model.downloading && this.get().modelDl.state === 'idle') {
+          patch.modelDl = { state: 'downloading', percent: info.model.percent, detail: '' };
+        }
+        this.set(patch);
+      } catch { /* row shows its neutral state */ }
+    }
+
+    // --- speech model (one-time download for transcripts) ---------------------------
+
+    async downloadModel() {
+      this.set({ modelDl: { state: 'downloading', percent: 0, detail: '' } });
+      try { await api.modelDownload(); }
+      catch (err) { this.set({ modelDl: { state: 'failed', percent: 0, detail: reason(err) } }); }
+    }
+
+    cancelModelDownload() {
+      api.modelCancel();
+    }
+
+    async _onModelProgress({ state, percent, detail }) {
+      if (state === 'done') {
+        this.set({ modelDl: { state: 'idle', percent: 100, detail: '' } });
+        await this.refreshAgentInfo();
+        this.toast('Speech model installed. New recordings get a transcript.');
+        // Add the transcript to the recording on the Saved sheet, if any.
+        const s = this.get();
+        if (s.flow === 'saved' && s.lastFilePath && s.agentFor === s.lastFilePath && s.agentTranscript === 'no-engine') {
+          api.agentEnsure(s.lastFilePath);
+        }
+      } else if (state === 'cancelled') {
+        this.set({ modelDl: { state: 'idle', percent: percent || 0, detail: '' } });
+      } else if (state === 'failed') {
+        this.set({ modelDl: { state: 'failed', percent: percent || 0, detail: detail || 'The download failed.' } });
+      } else {
+        this.set({ modelDl: { state, percent: percent || 0, detail: '' } });
+      }
+    }
+
+    _onAgentStatus(status) {
+      // Reports can arrive before or after the Saved sheet opens; key by file.
+      this.set({
+        agentFor: status.path, agentState: status.state,
+        agentSummaryPath: status.summaryPath || '', agentTranscript: status.transcript || '',
+      });
+    }
+
+    async copyAgentPath() {
+      const p = this.get().agentSummaryPath;
+      if (!p) return false;
+      try { await navigator.clipboard.writeText(p); return true; }
+      catch { this.toast('Could not copy the path.', 'warn'); return false; }
+    }
+
+    async copyAgentCommand(which) {
+      const info = this.get().agentInfo;
+      const command = info && info.commands && info.commands[which];
+      if (!command) return false;
+      try { await navigator.clipboard.writeText(command); return true; }
+      catch { this.toast('Could not copy the command.', 'warn'); return false; }
     }
 
     // --- Dropbox link sharing -------------------------------------------------------
@@ -547,6 +703,14 @@
       api.onConversionComplete(() => {});
       api.onConversionStatus(() => {});
       api.onLibraryMeta((meta) => this._mergeLibraryMeta(meta));
+      api.onControlsCommand((command) => this._onCommand(command));
+      api.onAgentStatus((status) => this._onAgentStatus(status));
+      api.onModelProgress((progress) => this._onModelProgress(progress));
+      api.onWindowVisibility((visible) => this._onWindowVisibility(visible));
+      // macOS reports show/hide by whether the window is actually on screen
+      // (a fully covered window counts as hidden). If a "shown" report is
+      // ever missed, the window gaining focus proves it is in use.
+      window.addEventListener('focus', () => { if (this._windowHidden) this._onWindowVisibility(true); });
       api.onDropboxProgress(({ percent }) => {
         if (this.get().shareState === 'uploading') this.set({ shareProgress: percent });
       });
@@ -604,18 +768,15 @@
         return;
       }
 
-      const isMp4 = item.mimeType.includes('mp4');
-      const wantMp4 = s.format === 'mp4';
-      const convert = wantMp4 && !isMp4;
-      const ext = (isMp4 || wantMp4) ? '.mp4' : '.webm';
+      const { ext, copyVideo, convert } = exportPlan(item.mimeType, s.format, s.quality);
       const destPath = `${folder}/${generateName('MyScreen recovered')}${ext}`;
       const rest = (s.recoverable || []).slice(1);
 
-      this.set({ flow: 'saving', saveProgress: convert ? 0 : 50, saveEta: '', lastDuration: 0, recoverable: rest });
+      this.set({ flow: 'saving', saveEncoding: convert, saveProgress: convert ? 0 : 50, saveEta: '', lastDuration: 0, recoverable: rest });
       this._conversionStart = null;
 
       try {
-        const result = await api.recoverRecording({ recordingId: item.recordingId, destPath, convert, quality: mapQuality(s.quality) });
+        const result = await api.recoverRecording({ recordingId: item.recordingId, destPath, convert, copyVideo, quality: mapQuality(s.quality) });
         this._showSaved(result.filePath || destPath);
         if (result.conversionFailed) this.toast('Converting to MP4 failed, so the recording was recovered as WebM instead.', 'warn');
       } catch (err) {

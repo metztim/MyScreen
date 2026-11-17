@@ -7,8 +7,9 @@
     "start": "electron .",
     "test": "node --test test/*.test.js",
     "build": "electron-builder",
-    "dist": "npm run build:native && APPLE_KEYCHAIN_PROFILE=myscreen-notarize electron-builder",
-    "build:native": "node-gyp rebuild"
+    "dist": "npm run build:native && npm run build:whisper && APPLE_KEYCHAIN_PROFILE=myscreen-notarize electron-builder",
+    "build:native": "node-gyp rebuild",
+    "build:whisper": "bash scripts/build-whisper.sh"
   },
   "keywords": [
     "screen-recorder",
@@ -22,7 +23,7 @@
     "node-addon-api": "^8.8.0"
   },
   "devDependencies": {
-    "electron": "^37.2.6",
+    "electron": "^45.3.3",
     "electron-builder": "^24.13.3"
   },
   "build": {
@@ -40,6 +41,11 @@
       "dropbox-share.js",
       "settings-store.js",
       "library-store.js",
+      "tray-controls.js",
+      "agent-files.js",
+      "mcp-server.js",
+      "model-download.js",
+      "package.json",
       "index.html",
       "ui/**",
       "vendor/**",
@@ -55,7 +61,8 @@
       "extendInfo": {
         "NSCameraUsageDescription": "MyScreen records your camera for the optional overlay and camera-only recordings.",
         "NSMicrophoneUsageDescription": "MyScreen records your microphone so your voice is in the recording.",
-        "NSScreenCaptureUsageDescription": "MyScreen captures your screen to create recordings."
+        "NSScreenCaptureUsageDescription": "MyScreen captures your screen to create recordings.",
+        "NSAudioCaptureUsageDescription": "MyScreen records your Mac's sound when system audio is switched on."
       },
       "notarize": true
     },
@@ -74,12 +81,19 @@
       ]
     },
     "asarUnpack": [
-      "node_modules/ffmpeg-static/**"
+      "node_modules/ffmpeg-static/**",
+      "mcp-server.js",
+      "agent-files.js",
+      "package.json"
     ],
     "extraResources": [
       {
         "from": "build/Release/screen_prompt.node",
         "to": "screen_prompt.node"
+      },
+      {
+        "from": "vendor-bin/whisper-cli",
+        "to": "whisper-cli"
       }
     ]
   }
