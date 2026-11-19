@@ -10,7 +10,7 @@
         "MACOSX_DEPLOYMENT_TARGET": "13.0"
       },
       "link_settings": {
-        "libraries": ["-framework ScreenCaptureKit", "-framework Foundation"]
+        "libraries": ["-framework ScreenCaptureKit", "-framework Foundation", "-framework CoreGraphics"]
       }
     }
   ]

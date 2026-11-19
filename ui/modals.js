@@ -320,8 +320,10 @@
   function Saved({ s, actions }) {
     // The file on disk is the truth: a failed MP4 conversion saves a WebM.
     const savedFormat = /\.webm$/i.test(s.lastFileName || '') ? 'WebM' : 'MP4';
+    // The file is being read for an upload: it stays until that is done.
+    const busy = s.shareState === 'uploading';
     return e('div', { className: 'scrim' },
-      e('div', { className: 'sheet sm', style: { maxWidth: 520 } },
+      e('div', { className: 'sheet sm', style: { maxWidth: 620 } },
         e('div', { className: 'sheet-head' },
           e('div', { style: { width: 40, height: 40, borderRadius: 10, background: 'var(--green-soft)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--green)', flex: '0 0 auto' } },
             e(Icon, { name: 'check', size: 22, strokeWidth: 2.4 })),
@@ -342,9 +344,10 @@
           ),
         ),
         e('div', { className: 'sheet-foot' },
-          e('button', { className: 'btn btn-soft', style: { height: 40 }, onClick: actions.reveal }, e(Icon, { name: 'folder', size: 16 }), 'Reveal in Finder'),
+          e('button', { className: 'btn btn-soft', style: { height: 40 }, disabled: busy, onClick: () => actions.trashLast(), title: 'Move this recording to the Trash' }, e(Icon, { name: 'trash', size: 16 }), 'Trash'),
+          e('button', { className: 'btn btn-soft', style: { height: 40 }, disabled: busy, onClick: () => actions.trashLast({ retake: true }), title: 'Move this recording to the Trash and record again' }, e(Icon, { name: 'refresh', size: 16 }), 'Retake'),
           e('div', { className: 'spacer' }),
-          e('button', { className: 'btn btn-soft', style: { height: 40 }, onClick: actions.recordAgain }, 'Record again'),
+          e('button', { className: 'btn btn-soft', style: { height: 40 }, onClick: actions.reveal }, e(Icon, { name: 'folder', size: 16 }), 'Reveal in Finder'),
           e('button', { className: 'btn btn-blue', style: { height: 40 }, onClick: actions.doneSaved }, 'Done'),
         ),
       ),

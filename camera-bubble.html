@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; media-src mediastream:">
+  <title>MyScreen camera</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; }
+    #bubble {
+      position: absolute; inset: 0; overflow: hidden; border-radius: 7%/9.33%;
+      background: linear-gradient(160deg, #3a4757, #222a36);
+      cursor: grab;
+    }
+    #bubble.circle { border-radius: 50%; }
+    #bubble.fixed { cursor: default; }
+    #bubble.dragging { cursor: grabbing; }
+    video { width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; }
+    video.mirror { transform: scaleX(-1); }
+  </style>
+</head>
+<body>
+  <div id="bubble"><video id="cam" autoplay muted playsinline></video></div>
+  <script>
+    // The main process calls applyConfig({ shape, mirror, deviceId, draggable }).
+    const bubble = document.getElementById('bubble');
+    const video = document.getElementById('cam');
+    let stream = null;
+    let openFor = null; // the deviceId the current stream was opened for
+    let generation = 0;
+
+    async function openCamera(deviceId) {
+      const mine = ++generation;
+      if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+      try {
+        const next = await navigator.mediaDevices.getUserMedia({
+          video: { ...(deviceId ? { deviceId: { ideal: deviceId } } : {}), width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false,
+        });
+        if (mine !== generation) { next.getTracks().forEach((t) => t.stop()); return; }
+        stream = next;
+        video.srcObject = stream;
+      } catch { /* no camera or no permission: the plain bubble still marks the spot */ }
+    }
+
+    // Dragging moves the whole window; the main process does the moving.
+    let dragStart = null;
+    bubble.addEventListener('pointerdown', (ev) => {
+      if (bubble.classList.contains('fixed') || ev.button !== 0) return;
+      dragStart = { x: ev.screenX, y: ev.screenY };
+      bubble.setPointerCapture(ev.pointerId);
+      bubble.classList.add('dragging');
+      window.bubbleAPI.drag('start', 0, 0);
+    });
+    bubble.addEventListener('pointermove', (ev) => {
+      if (dragStart) window.bubbleAPI.drag('move', ev.screenX - dragStart.x, ev.screenY - dragStart.y);
+    });
+    const endDrag = () => {
+      if (!dragStart) return;
+      dragStart = null;
+      bubble.classList.remove('dragging');
+      window.bubbleAPI.drag('end', 0, 0);
+    };
+    bubble.addEventListener('pointerup', endDrag);
+    bubble.addEventListener('pointercancel', endDrag);
+
+    window.applyConfig = (config) => {
+      bubble.classList.toggle('circle', config.shape === 'circle');
+      bubble.classList.toggle('fixed', !config.draggable);
+      video.classList.toggle('mirror', !!config.mirror);
+      if (openFor !== config.deviceId) { openFor = config.deviceId; openCamera(config.deviceId); }
+    };
+  </script>
+</body>
+</html>

@@ -13,7 +13,8 @@
 // folder), --user-data-dir <dir> (where settings.json lives).
 //
 // It only reads video files inside the recordings folder and only writes
-// the agent files under <folder>/.myscreen (see agent-files.js). stdout
+// under <folder>/.myscreen: the agent files, and the title and description
+// an agent saves for a recording (see agent-files.js). stdout
 // carries the protocol; anything else goes to stderr.
 
 const fs = require('fs');
@@ -118,8 +119,21 @@ const TOOLS = [
     },
   },
   {
+    name: 'describe_recording',
+    description: 'Save a title and a short description for a recording. MyScreen shows them in its recordings overview in place of the file name. Write them from the transcript and key frames: a specific title of a few words, and one or two sentences on what the recording shows. Calling it again replaces what was saved.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        recording: { type: 'string', description: 'A name from list_recordings, or "latest" (default).' },
+        title: { type: 'string', description: 'A specific title, under 60 characters.' },
+        description: { type: 'string', description: 'One or two sentences on what the recording shows.' },
+      },
+      required: ['title', 'description'],
+    },
+  },
+  {
     name: 'search_recordings',
-    description: 'Find recordings by what was said in them or by name. Searches the transcripts that have been prepared so far and every file name.',
+    description: 'Find recordings by title, description, file name, or what was said in them. Searches the transcripts that have been prepared so far.',
     inputSchema: {
       type: 'object',
       properties: { query: { type: 'string', description: 'Words to look for.' } },
@@ -145,7 +159,8 @@ function createToolHandlers({ recordings, agent }) {
         bits.push(manifest
           ? (manifest.transcript.status === 'ok' ? `transcript ready (${manifest.transcript.segments.length} lines)` : `no transcript (${manifest.transcript.status})`)
           : 'not prepared yet');
-        lines.push(`- ${rec.name} · ${bits.join(' · ')}`);
+        const notes = await agent.readNotes(rec.path);
+        lines.push(`- ${rec.name} · ${bits.join(' · ')}${notes && notes.title ? ` · "${notes.title}"` : ''}`);
       }
       const more = all.length > lines.length ? `\n(${all.length - lines.length} older recordings not shown.)` : '';
       return [text(`Recordings in ${recordings.folder}, newest first:\n${lines.join('\n')}${more}`)];
@@ -154,7 +169,17 @@ function createToolHandlers({ recordings, agent }) {
     async get_recording({ recording = 'latest' } = {}) {
       const rec = await recordings.resolve(recording);
       await agent.ensure(rec.path);
-      return [text(await fsp.readFile(agent.summaryPathFor(rec.path), 'utf-8'))];
+      const notes = await agent.readNotes(rec.path);
+      const header = notes
+        ? `Title: ${notes.title || '(none)'}\nDescription: ${notes.description || '(none)'}\n\n`
+        : 'This recording has no title or description yet. Save them with describe_recording once you have read it.\n\n';
+      return [text(header + await fsp.readFile(agent.summaryPathFor(rec.path), 'utf-8'))];
+    },
+
+    async describe_recording({ recording = 'latest', title = '', description = '' } = {}) {
+      const rec = await recordings.resolve(recording);
+      const notes = await agent.writeNotes(rec.path, { title, description });
+      return [text(`Saved for ${rec.name}.\nTitle: ${notes.title || '(none)'}\nDescription: ${notes.description || '(none)'}`)];
     },
 
     async get_frames({ recording = 'latest', start = 0, end = null, times = null, max = 6 } = {}) {
@@ -204,6 +229,9 @@ function createToolHandlers({ recordings, agent }) {
         if (!manifest) unprepared++;
         const lines = [];
         if (rec.name.toLowerCase().includes(needle)) lines.push('  name matches');
+        const notes = await agent.readNotes(rec.path);
+        if (notes && notes.title.toLowerCase().includes(needle)) lines.push(`  title: ${notes.title}`);
+        if (notes && notes.description.toLowerCase().includes(needle)) lines.push(`  description: ${notes.description}`);
         if (manifest && manifest.transcript.status === 'ok') {
           for (const seg of manifest.transcript.segments) {
             if (seg.text.toLowerCase().includes(needle)) lines.push(`  [${clock(seg.start)}] ${seg.text}`);
@@ -236,7 +264,7 @@ function createServer({ recordings, agent }) {
           protocolVersion: PROTOCOL_VERSIONS.includes(asked) ? asked : PROTOCOL_VERSIONS[0],
           capabilities: { tools: {} },
           serverInfo: { name: 'myscreen', title: 'MyScreen', version: SERVER_VERSION },
-          instructions: 'Screen recordings the user made with MyScreen, each with a narration transcript and key frames. When the user refers to a recording ("my last recording", "the video I just made"), call get_recording with "latest", read the transcript, then call get_frames for the moments that matter.',
+          instructions: 'Screen recordings the user made with MyScreen, each with a narration transcript and key frames. When the user refers to a recording ("my last recording", "the video I just made"), call get_recording with "latest", read the transcript, then call get_frames for the moments that matter. When a recording you have read has no title yet, save a title and a short description with describe_recording; MyScreen shows them to the user.',
         });
       }
       case 'ping':

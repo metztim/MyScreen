@@ -25,6 +25,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   libraryList: () => ipcRenderer.invoke('library:list'),
   libraryOpen: (filePath) => ipcRenderer.invoke('library:open', filePath),
   libraryMeta: (filePath) => ipcRenderer.invoke('library:meta-for', filePath),
+  // The camera shown on the real screen.
+  cameraBubbleSync: (request) => ipcRenderer.invoke('camera-bubble:sync', request),
+  onCameraBubbleMoved: (callback) => replaceListener('camera-bubble:moved', (event, position) => callback(position)),
+  libraryTrash: (filePath) => ipcRenderer.invoke('library:trash', filePath),
   onLibraryMeta: (callback) => replaceListener('library:meta', (event, meta) => callback(meta)),
 
   // Permissions preflight.

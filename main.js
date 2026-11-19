@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, desktopCapturer, systemPreferences, shell, Menu, Tray, globalShortcut, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, desktopCapturer, systemPreferences, shell, Menu, Tray, globalShortcut, nativeImage, screen } = require('electron');
 const path = require('path');
 const os = require('os');
 const fsSync = require('fs');
@@ -12,6 +12,7 @@ const SettingsStore = require('./settings-store');
 const LibraryStore = require('./library-store');
 const DropboxShare = require('./dropbox-share');
 const { RecordingControls } = require('./tray-controls');
+const { CameraBubble } = require('./camera-bubble');
 const AgentFiles = require('./agent-files');
 const { SpeechModel } = require('./model-download');
 
@@ -99,13 +100,13 @@ function createWindow() {
   // A window nobody can see (closed to the menu bar, minimized, or on macOS
   // fully covered by other windows) must not keep the screen or camera open
   // for its preview; the renderer drops and restores them on these.
-  for (const gone of ['hide', 'minimize']) mainWindow.on(gone, () => safeSend(mainWindow, 'window:visibility', false));
-  for (const back of ['show', 'restore']) mainWindow.on(back, () => safeSend(mainWindow, 'window:visibility', true));
+  for (const gone of ['hide', 'minimize']) mainWindow.on(gone, () => { safeSend(mainWindow, 'window:visibility', false); if (cameraBubble) cameraBubble.refresh(); });
+  for (const back of ['show', 'restore']) mainWindow.on(back, () => { safeSend(mainWindow, 'window:visibility', true); if (cameraBubble) cameraBubble.refresh(); });
 
   // A reload or a renderer crash ends whatever recording that renderer was
   // feeding. Close those files so they show up as recoverable right away.
   mainWindow.webContents.on('did-start-navigation', (event, url, isInPlace, isMainFrame) => {
-    if (isMainFrame && !isInPlace) releaseOpenRecordings();
+    if (isMainFrame && !isInPlace) { releaseOpenRecordings(); if (cameraBubble) cameraBubble.sync(null); }
   });
   mainWindow.webContents.on('render-process-gone', async (event, details) => {
     console.error('Renderer process gone:', details && details.reason);
@@ -114,6 +115,7 @@ function createWindow() {
   });
 
   mainWindow.on('closed', () => {
+    if (cameraBubble) cameraBubble.dispose();
     mainWindow = null;
   });
 
@@ -200,7 +202,8 @@ const SETTINGS_DEFAULTS = {
   camDeviceId: '',
   camMirror: true,
   camShape: 'rounded',      // rounded | circle
-  camX: 70, camY: 64, camW: 0.2,
+  bubbleOn: true,           // show the camera on the real screen (camera-bubble.js)
+  camX: 82, camY: 74, camW: 0.15, // top-left corner in % of the video, width as a fraction of its width
   micOn: true,
   micDeviceId: '',
   countdownOn: true,
@@ -274,17 +277,83 @@ ipcMain.handle('dialog:choose-folder', async () => {
   return { folder, folderDisplay: displayFolder(folder) };
 });
 
+// --- camera on the real screen (camera-bubble.js) ---
+
+// The native addon: the screen-recording prompt and window positions. Missing
+// in a checkout until `npm run build:native`.
+let nativeModule;
+function nativeAddon() {
+  if (nativeModule === undefined) {
+    try {
+      nativeModule = require(app.isPackaged
+        ? path.join(process.resourcesPath, 'screen_prompt.node')
+        : path.join(__dirname, 'build', 'Release', 'screen_prompt.node'));
+    } catch {
+      nativeModule = null;
+    }
+  }
+  return nativeModule;
+}
+
+let cameraBubble = null;
+function getCameraBubble() {
+  if (!cameraBubble) {
+    cameraBubble = new CameraBubble({
+      BrowserWindow, screen,
+      htmlPath: path.join(__dirname, 'camera-bubble.html'),
+      preloadPath: path.join(__dirname, 'camera-bubble-preload.js'),
+      windowBounds: (id) => {
+        const native = nativeAddon();
+        return native && native.windowBounds ? native.windowBounds(id) : null;
+      },
+      mainWindowOpen: () => !!mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible(),
+      onMoved: (position) => safeSend(mainWindow, 'camera-bubble:moved', position),
+    });
+  }
+  return cameraBubble;
+}
+
+ipcMain.handle('camera-bubble:sync', (event, request) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) return { shown: false, inPicture: false };
+  return getCameraBubble().sync(request);
+});
+
+ipcMain.on('camera-bubble:drag', (event, report) => {
+  if (!cameraBubble || !cameraBubble.win || cameraBubble.win.isDestroyed()) return;
+  if (event.sender !== cameraBubble.win.webContents) return;
+  cameraBubble.drag(report);
+});
+
 // --- recordings library ---
 
 let libraryStore = null;
 
 ipcMain.handle('library:list', async () => {
   const folder = settingsStore.get().folder;
-  return libraryStore.list(folder, (meta) => safeSend(mainWindow, 'library:meta', meta));
+  const entries = await libraryStore.list(folder, (meta) => safeSend(mainWindow, 'library:meta', meta));
+  // Title and description a coding agent saved for the recording.
+  return Promise.all(entries.map(async (entry) => {
+    const notes = await agentFiles.readNotes(entry.path);
+    return notes ? { ...entry, title: notes.title, description: notes.description } : entry;
+  }));
 });
 
 ipcMain.handle('library:open', (event, filePath) => {
   if (typeof filePath === 'string' && filePath) shell.openPath(filePath);
+});
+
+// Move a recording to the Trash, with the files made for agents. Only video
+// files directly inside the recordings folder qualify.
+ipcMain.handle('library:trash', async (event, filePath) => {
+  const folder = path.resolve(settingsStore.get().folder);
+  const target = typeof filePath === 'string' ? path.resolve(filePath) : '';
+  if (!target || path.dirname(target) !== folder || !/\.(mp4|webm)$/i.test(target) || path.basename(target).startsWith('.')) {
+    throw new Error('That file is not a recording in the recordings folder.');
+  }
+  await shell.trashItem(target);
+  try { await shell.trashItem(agentFiles.dirFor(target)); } catch { /* no agent files for this one */ }
+  try { await shell.trashItem(agentFiles.notesPathFor(target)); } catch { /* no title saved */ }
+  return true;
 });
 
 // Thumbnail + duration for one file (the Saved sheet shows the new recording).
@@ -421,12 +490,8 @@ ipcMain.handle('permissions:request', async (event, type) => {
     // user must add the app via "+" in System Settings themselves - the
     // sheet's copy walks them through it. So: trigger SCK for the older
     // systems AND open the Settings pane for the new ones.
-    try {
-      const native = require(app.isPackaged
-        ? path.join(process.resourcesPath, 'screen_prompt.node')
-        : path.join(__dirname, 'build', 'Release', 'screen_prompt.node'));
-      native.triggerScreenCapturePrompt();
-    } catch { /* addon missing in dev until `npm run build:native` */ }
+    const native = nativeAddon();
+    if (native) native.triggerScreenCapturePrompt();
     shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
     return false; // granted state is picked up by the renderer's poll
   }

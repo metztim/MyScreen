@@ -18,7 +18,9 @@ Canonical description: **"a free, open-source alternative to Loom"**. Use this p
 - `mcp-server.js` — stdio MCP server (hand-written JSON-RPC, no SDK) exposing `list_recordings`, `get_recording`, `get_frames`, `search_recordings`. Runs without the app: `ELECTRON_RUN_AS_NODE=1 <app binary> <app.asar.unpacked>/mcp-server.js`. It and `agent-files.js` are in `asarUnpack`.
 - `ui/` — React 18 UMD (vendored in `vendor/`, production build), all components plain `React.createElement`, IIFEs exporting to `window.*`. Load order in `index.html` matters.
   - `ui/controller.js` — the keystone: bridges React state ⇄ engine ⇄ electronAPI. React owns view/config state; controller owns streams, engine events → flow strings (`ready|picker|overlayEdit|countdown|recording|paused|stopping|saving|saved|permissions|recovery`).
-- Camera overlay: canvas compositing in the engine for BOTH window and full-screen capture; the preview bubble maps to the video content box so preview == output. No floating camera window (deleted).
+- `camera-bubble.js` (+ `camera-bubble.html`, `camera-bubble-preload.js`) — the camera shown on the real screen. Full screen: the floating window is captured as part of the screen, so the engine does not composite (`syncBubble()` returns `inPicture`). One window: the engine composites, and the floating window marks the spot over the recorded window (position from `windowBounds` in the native addon), click-through while recording. `bubbleOn: false` turns it off and the engine composites in both modes.
+- `ui/cam-layout.js` — camera size names (small/medium/large) and the math that keeps the camera in its corner; shared by the Camera popover and the preview editor.
+- Camera overlay: canvas compositing in the engine; the preview bubble maps to the video content box so preview == output.
 
 ## Conventions
 
@@ -27,6 +29,7 @@ Canonical description: **"a free, open-source alternative to Loom"**. Use this p
 - Closing the window hides it (the app lives in the menu bar); only Cmd+Q or the menu quits. Quit with a recording open goes through `requestQuit()` so the renderer finalizes first. The renderer drops its previews while the window is not visible (`window:visibility`).
 - Every export goes through `exportRecording` (main.js): MP4 encode → remuxed WebM → raw copy, each written to a hidden `.<name>.part.<ext>` sibling and renamed into place (`writeAtomically`). The library skips dotfiles. No cap on total conversion time, only a 60s no-output stall kill.
 - The engine watches capture tracks for `ended`: a source that goes away stops and saves the recording; a lost mic or camera raises a warning. `_fail` closes the partial file so recovery can offer it in the same session.
+- Deleting a recording (`library:trash`) moves the video and its `.myscreen/<name>/` folder to the Trash; only files directly in the recordings folder qualify.
 - Toasts take a kind (`info` | `warn` | `error`); `error` stays until dismissed. Use it for anything that changes what ends up in the recording.
 - Dropbox tokens stay in the main process: `settings:get` strips `dropboxAuth`, `settings:set` ignores the Dropbox keys.
 - Settings persist via `settings:get/set` IPC; UI persists the `PERSISTED` subset in `ui/app.js` (debounced). Keys must exist in `SETTINGS_DEFAULTS` (main.js).

@@ -66,7 +66,7 @@
     function onResizeMove(ev) {
       const d = resz.current; if (!d) return;
       const dw = ((ev.clientX - d.startX) / d.r.width);
-      set({ camW: Math.max(0.12, Math.min(0.4, d.startW + dw)) });
+      set({ camW: Math.max(CamLayout.MIN_W, Math.min(CamLayout.MAX_W, d.startW + dw)) });
     }
     function onResizeUp() {
       resz.current = null;
@@ -121,13 +121,15 @@
       e('div', { className: 'ob-sep' }),
       e('div', { className: 'ob-group' },
         e('span', { className: 'ob-label' }, 'Size'),
-        e('button', { className: 'ob-btn' + (s.camW < 0.18 ? ' on' : ''), onClick: () => set({ camW: 0.15 }), title: 'Small', style: { fontSize: 11, fontWeight: 700 } }, 'S'),
-        e('button', { className: 'ob-btn' + (s.camW >= 0.18 && s.camW < 0.28 ? ' on' : ''), onClick: () => set({ camW: 0.22 }), title: 'Medium', style: { fontSize: 12, fontWeight: 700 } }, 'M'),
-        e('button', { className: 'ob-btn' + (s.camW >= 0.28 ? ' on' : ''), onClick: () => set({ camW: 0.32 }), title: 'Large', style: { fontSize: 13, fontWeight: 700 } }, 'L'),
+        CamLayout.SIZES.map((size, i) => e('button', {
+          key: size.v, className: 'ob-btn' + (CamLayout.sizeOf(s.camW) === size.v ? ' on' : ''), title: size.label,
+          onClick: () => set(CamLayout.patch(s, { w: size.w }, CamLayout.frameAspect())),
+          style: { fontSize: 11 + i, fontWeight: 700 },
+        }, size.short)),
       ),
       e('div', { className: 'ob-sep' }),
       e('div', { className: 'ob-group' },
-        e('button', { className: 'ob-btn' + (s.camShape === 'circle' ? ' on' : ''), onClick: () => set({ camShape: s.camShape === 'circle' ? 'rounded' : 'circle' }), title: 'Circle' },
+        e('button', { className: 'ob-btn' + (s.camShape === 'circle' ? ' on' : ''), onClick: () => set(CamLayout.patch(s, { shape: s.camShape === 'circle' ? 'rounded' : 'circle' }, CamLayout.frameAspect())), title: 'Circle' },
           e('div', { style: { width: 18, height: 18, borderRadius: '50%', border: '2px solid currentColor' } })),
         e('button', { className: 'ob-btn' + (s.camMirror ? ' on' : ''), onClick: () => set({ camMirror: !s.camMirror }), title: 'Mirror' },
           e(Icon, { name: 'flip', size: 18 })),
@@ -225,7 +227,9 @@
             ref: layerRef, className: 'cam-layer',
             style: { position: 'absolute', left: contentRect.left, top: contentRect.top, width: contentRect.width, height: contentRect.height, pointerEvents: 'none', zIndex: 8 },
           },
-            s.overlayEditable
+            // On a full-screen preview the camera window on the real screen
+            // is already in the picture.
+            s.overlayEditable && !(s.mode === 'screen' && s.bubbleInPicture)
               ? e(CameraOverlay, { s, set, editing, stageRef: layerRef, actions, flow: s.flow })
               : null,
           )

@@ -23,6 +23,8 @@ const { spawn } = require('child_process');
 
 const MANIFEST_VERSION = 1;
 const AGENT_DIR = '.myscreen';
+const MAX_TITLE_LENGTH = 120;
+const MAX_DESCRIPTION_LENGTH = 600;
 const VIDEO_EXT = new Set(['.mp4', '.webm']);
 
 const MAX_FRAMES = 40;
@@ -109,6 +111,36 @@ class AgentFiles {
   summaryPathFor(videoPath) { return path.join(this.dirFor(videoPath), 'recording.md'); }
   manifestPathFor(videoPath) { return path.join(this.dirFor(videoPath), 'recording.json'); }
 
+  // --- title and description -----------------------------------------------------
+  // Written by a coding agent after it read the transcript (the MCP server's
+  // describe_recording), shown by the app. Kept beside the recording's folder
+  // so rebuilding the transcript and frames leaves it alone.
+
+  notesPathFor(videoPath) { return `${this.dirFor(videoPath)}.notes.json`; }
+
+  async readNotes(videoPath) {
+    try {
+      const notes = JSON.parse(await fsp.readFile(this.notesPathFor(videoPath), 'utf-8'));
+      const title = typeof notes.title === 'string' ? notes.title : '';
+      const description = typeof notes.description === 'string' ? notes.description : '';
+      return title || description ? { title, description } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async writeNotes(videoPath, { title = '', description = '' } = {}) {
+    const clean = (value, max) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+    const notes = { title: clean(title, MAX_TITLE_LENGTH), description: clean(description, MAX_DESCRIPTION_LENGTH) };
+    if (!notes.title && !notes.description) throw new Error('Give a title, a description, or both.');
+    const target = this.notesPathFor(videoPath);
+    await fsp.mkdir(path.dirname(target), { recursive: true });
+    const tmp = `${target}.tmp-${process.pid}`;
+    await fsp.writeFile(tmp, JSON.stringify({ ...notes, writtenAt: new Date().toISOString() }, null, 2));
+    await fsp.rename(tmp, target);
+    return notes;
+  }
+
   // The manifest, if it exists and still describes this exact file.
   async read(videoPath) {
     let manifest;
@@ -147,6 +179,7 @@ class AgentFiles {
 
   async remove(videoPath) {
     await fsp.rm(this.dirFor(videoPath), { recursive: true, force: true });
+    await fsp.rm(this.notesPathFor(videoPath), { force: true });
   }
 
   // --- transcription engine ---------------------------------------------------------

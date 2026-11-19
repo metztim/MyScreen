@@ -48,7 +48,7 @@ test('handshake: initialize, tool list, ping, and silence for notifications', as
   assert.deepStrictEqual((await handle({ jsonrpc: '2.0', id: 3, method: 'ping' })).result, {});
 
   const tools = (await handle({ jsonrpc: '2.0', id: 4, method: 'tools/list' })).result.tools;
-  assert.deepStrictEqual(tools.map((t) => t.name), ['list_recordings', 'get_recording', 'get_frames', 'search_recordings']);
+  assert.deepStrictEqual(tools.map((t) => t.name), ['list_recordings', 'get_recording', 'get_frames', 'describe_recording', 'search_recordings']);
   assert.strictEqual(tools, TOOLS);
 
   assert.strictEqual((await handle({ jsonrpc: '2.0', id: 5, method: 'nope' })).error.code, -32601);
@@ -65,7 +65,7 @@ test('tools: list, read the latest recording, fetch frames, search', async () =>
   assert.ok(!listed.includes('.part'), 'saves in progress are not recordings');
 
   const latest = await call('get_recording', { recording: 'latest' });
-  assert.match(latest.content[0].text, /^# Bug walkthrough/);
+  assert.match(latest.content[0].text, /^# Bug walkthrough/m);
   assert.match(latest.content[0].text, /No transcript: The recording has no audio track/);
   assert.match(latest.content[0].text, /\[0:03\] .*frames\/002-0m03s\.jpg/);
 
@@ -137,6 +137,35 @@ test('speaks newline-delimited JSON-RPC over stdio as a real process', async () 
   assert.deepStrictEqual(replies.map((r) => r.id), [1, 2], 'one reply per request, none for the notification');
   assert.match(replies[1].result.content[0].text, /Bug walkthrough\.mp4/);
   assert.match(replies[1].result.content[0].text, /1 older recordings not shown/);
+
+  await fsp.rm(folder, { recursive: true, force: true });
+});
+
+test('describe_recording saves a title and description that the other tools show', async () => {
+  const { folder, agent, call } = await setup();
+  const video = path.join(folder, 'Bug walkthrough.mp4');
+
+  const before = await call('get_recording', { recording: 'latest' });
+  assert.match(before.content[0].text, /no title or description yet/);
+
+  const saved = await call('describe_recording', { title: '  Checkout  button\nbug ', description: 'Shows the checkout button doing nothing on the second click.' });
+  assert.ok(!saved.isError, saved.content[0].text);
+  assert.deepStrictEqual(await agent.readNotes(video), { title: 'Checkout button bug', description: 'Shows the checkout button doing nothing on the second click.' });
+
+  const after = await call('get_recording', { recording: 'latest' });
+  assert.match(after.content[0].text, /^Title: Checkout button bug\nDescription: Shows the checkout/);
+  assert.match((await call('list_recordings', {})).content[0].text, /Bug walkthrough\.mp4 .* "Checkout button bug"/);
+  assert.match((await call('search_recordings', { query: 'second click' })).content[0].text, /description: Shows the checkout/);
+
+  // Rebuilding the transcript and frames keeps the title.
+  await agent.ensure(video, null);
+  await fsp.rm(agent.dirFor(video), { recursive: true, force: true });
+  await agent.ensure(video, null);
+  assert.strictEqual((await agent.readNotes(video)).title, 'Checkout button bug');
+
+  // Nothing to save, and files outside the folder, are refused.
+  assert.strictEqual((await call('describe_recording', { title: ' ', description: '' })).isError, true);
+  assert.strictEqual((await call('describe_recording', { recording: '../etc/passwd', title: 'x', description: 'y' })).isError, true);
 
   await fsp.rm(folder, { recursive: true, force: true });
 });

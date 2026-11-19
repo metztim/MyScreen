@@ -85,6 +85,7 @@
           camOn: settings.camOn, camDeviceId: settings.camDeviceId,
           camMirror: settings.camMirror, camShape: settings.camShape,
           camX: settings.camX, camY: settings.camY, camW: settings.camW,
+          bubbleOn: settings.bubbleOn !== false,
           micOn: settings.micOn, micDeviceId: settings.micDeviceId,
           countdownOn: settings.countdownOn,
           floatingOn: settings.floatingOn,
@@ -162,6 +163,7 @@
     // hidden and idle, nothing may hold the screen or camera open.
     _onWindowVisibility(visible) {
       this._windowHidden = !visible;
+      this.set({ windowHidden: !visible });
       if (visible) {
         this._restorePreviews();
       } else if (!this._engineOwnsStage()) {
@@ -376,7 +378,10 @@
       // Overlay layout shares the preview bubble's coordinate system, so the
       // recorded output matches what the user arranged on the stage. Both
       // full-screen and window capture composite through the same canvas path.
-      const cameraOverlay = s.mode !== 'camera' && s.camOn
+      // On a full-screen recording the camera window on the screen is part of
+      // the captured picture, so it is not drawn into the video a second time.
+      const bubble = await this.syncBubble(s, { starting: true });
+      const cameraOverlay = s.mode !== 'camera' && s.camOn && !bubble.inPicture
         ? { x: s.camX, y: s.camY, w: s.camW, shape: s.camShape, mirror: s.camMirror }
         : false;
       if (cameraOverlay) {
@@ -400,7 +405,7 @@
           systemAudio: false, // not supported on macOS; shown as info in the panel
           preferH264: s.format === 'mp4', // WebM saves stay VP9
           // carried to the agent files written after the save
-          context: { source: { type: source.type, name: source.name || null }, microphone: !!s.micOn, camera: !!cameraOverlay || source.type === 'camera' },
+          context: { source: { type: source.type, name: source.name || null }, microphone: !!s.micOn, camera: !!cameraOverlay || bubble.inPicture || source.type === 'camera' },
           suggestedName: `${generateName()}.webm`,
         });
       } catch (err) {
@@ -707,6 +712,8 @@
       api.onAgentStatus((status) => this._onAgentStatus(status));
       api.onModelProgress((progress) => this._onModelProgress(progress));
       api.onWindowVisibility((visible) => this._onWindowVisibility(visible));
+      // The camera was dragged on the real screen.
+      api.onCameraBubbleMoved((position) => this.set({ camX: position.x, camY: position.y }));
       // macOS reports show/hide by whether the window is actually on screen
       // (a fully covered window counts as hidden). If a "shown" report is
       // ever missed, the window gaining focus proves it is in use.
@@ -875,7 +882,55 @@
       await this.checkRecovery();
     }
 
+    // --- camera on the real screen ---------------------------------------------------
+
+    // Tell the main process where the camera goes on the real screen (see
+    // camera-bubble.js). `s` defaults to the current state; _begin passes the
+    // state a recording is about to start with. Returns { shown, inPicture }.
+    async syncBubble(s = this.get(), { starting = false } = {}) {
+      const source = s.mode === 'screen' ? s.screenSource : s.mode === 'window' ? s.windowSource : null;
+      const active = starting || ['countdown', 'recording', 'paused'].includes(s.flow);
+      const idle = ['ready', 'overlayEdit'].includes(s.flow) && s.view !== 'library';
+      const request = {
+        visible: !!(s.camOn && s.bubbleOn && source && (active || idle)),
+        active,
+        mode: s.mode,
+        displayId: source && source.display_id,
+        sourceId: source && source.id,
+        layout: { x: s.camX, y: s.camY, w: s.camW, shape: s.camShape, mirror: s.camMirror },
+        deviceId: s.camDeviceId,
+      };
+      let result = { shown: false, inPicture: false };
+      try {
+        result = (await api.cameraBubbleSync(request)) || result;
+      } catch { /* no on-screen camera: the engine draws it into the video instead */ }
+      if (!!this.get().bubbleInPicture !== !!result.inPicture) this.set({ bubbleInPicture: !!result.inPicture });
+      return result;
+    }
+
     // --- recordings library ------------------------------------------------------------
+
+    // Moves a recording to the Trash. Returns whether it worked.
+    async trashRecording(filePath) {
+      if (!filePath) return false;
+      try {
+        await api.libraryTrash(filePath);
+      } catch (err) {
+        this.toast(`Could not move the recording to the Trash: ${reason(err)}`, 'error');
+        return false;
+      }
+      this.set({ recordings: (this.get().recordings || []).filter((r) => r.path !== filePath) });
+      return true;
+    }
+
+    // Saved sheet: throw the new recording away, and optionally record it again.
+    async trashLast({ retake = false } = {}) {
+      const s = this.get();
+      if (!(await this.trashRecording(s.lastFilePath))) return;
+      this.set({ flow: 'ready', view: 'recorder', elapsed: 0, saveProgress: 0, lastFilePath: '', lastFileName: '', lastThumbnail: null, shareState: 'none', shareUrl: '' });
+      if (retake) this.startRecording();
+      else this.toast('Recording moved to the Trash.');
+    }
 
     async loadLibrary() {
       let entries;
@@ -892,7 +947,9 @@
       return {
         id: en.path,
         path: en.path,
-        title: en.name.replace(/\.(mp4|webm)$/i, ''),
+        title: en.title || en.name.replace(/\.(mp4|webm)$/i, ''),
+        fileName: en.name,
+        description: en.description || '',
         dur: en.durationSeconds != null ? this._fmtDur(en.durationSeconds) : '…',
         when: this._friendlyDate(en.mtimeMs),
         size: this._formatBytes(en.sizeBytes),

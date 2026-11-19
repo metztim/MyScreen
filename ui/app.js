@@ -15,7 +15,7 @@
     windowSource: null,
     pickScreens: [], pickWindows: [],
     camOn: false, camDeviceId: '', camMirror: true, camShape: 'rounded',
-    camX: 70, camY: 64, camW: 0.2,
+    camX: 82, camY: 74, camW: 0.15,
     overlayEditable: true,         // engine composites the overlay at the arranged layout (window mode)
     micOn: true, micDeviceId: '',
     mics: [], cams: [],
@@ -40,11 +40,14 @@
     recHasAudio: true,             // the running recording carries a live mic track
     lastThumbnail: null,
     toastMsg: '', toastKind: 'info',
+    bubbleOn: true,               // show the camera on the real screen, where it lands in the recording
+    bubbleInPicture: false,       // that camera window is being captured as part of the screen
+    windowHidden: false,          // the window is hidden or fully covered: live meters and previews pause
   };
 
   // settings persisted across sessions (must exist in main.js SETTINGS_DEFAULTS)
   const PERSISTED = ['format', 'quality', 'camOn', 'camDeviceId', 'camMirror', 'camShape',
-    'camX', 'camY', 'camW', 'micOn', 'micDeviceId', 'countdownOn', 'floatingOn',
+    'camX', 'camY', 'camW', 'bubbleOn', 'micOn', 'micDeviceId', 'countdownOn', 'floatingOn',
     'hideOnRecord', 'globalShortcutsOn', 'agentFilesOn',
     'shareLink'];
 
@@ -82,6 +85,8 @@
     const windowId = s.windowSource && s.windowSource.id;
     useEffect(() => { c.syncPreview(); }, [s.mode, screenId, windowId]);
     useEffect(() => { c.syncCamera(); }, [s.mode, s.camOn, s.camDeviceId]);
+    useEffect(() => { c.syncBubble(); }, [s.flow, s.view, s.mode, screenId, windowId, s.camOn, s.bubbleOn,
+      s.camX, s.camY, s.camW, s.camShape, s.camMirror, s.camDeviceId]);
 
     // persist settings (debounced)
     const persistT = useRef(null);
@@ -127,7 +132,6 @@
     }
     function setFlow(f) { set({ flow: f }); }
 
-    function recordAgain() { set({ flow: 'ready', elapsed: 0, saveProgress: 0 }); }
     function doneSaved() {
       const next = sRef.current.recoverable.length ? 'recovery' : 'ready';
       set({ flow: next, view: next === 'ready' ? 'library' : 'recorder', elapsed: 0, saveProgress: 0 });
@@ -142,7 +146,9 @@
       togglePause: () => c.togglePause(),
       stop: () => c.stop(),
       discardRecording: () => c.discard(),
-      recordAgain, doneSaved, newRecording,
+      doneSaved, newRecording,
+      trashLast: (opts) => c.trashLast(opts),
+      trashRecording: async (rec) => { if (await c.trashRecording(rec.path)) c.toast('Recording moved to the Trash.'); },
       grant: (k) => c.requestPermission(k),
       finishPermissions: () => c.finishPermissions(),
       relaunch: () => c.relaunchApp(),
