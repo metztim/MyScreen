@@ -518,7 +518,7 @@
 
     _showSaved(savedPath) {
       const patch = {
-        flow: 'saved', saveProgress: 100,
+        flow: 'saved', saveProgress: 100, savedFrom: 'record', lastTitle: '', lastDescription: '',
         lastFileName: savedPath.split('/').pop(), lastFilePath: savedPath, lastThumbnail: null,
       };
       // The main process may already have reported on this file.
@@ -688,6 +688,7 @@
     // --- conversion progress ---------------------------------------------------------
 
     _attachMainEvents() {
+      api.onTrimProgress(({ progress }) => { if (this.get().trimBusy) this.set({ trimProgress: progress }); });
       api.onConversionProgress(({ progress, currentTime, totalTime }) => {
         if (this.get().flow !== 'saving') return;
         let eta = '';
@@ -927,7 +928,7 @@
     async trashLast({ retake = false } = {}) {
       const s = this.get();
       if (!(await this.trashRecording(s.lastFilePath))) return;
-      this.set({ flow: 'ready', view: 'recorder', elapsed: 0, saveProgress: 0, lastFilePath: '', lastFileName: '', lastThumbnail: null, shareState: 'none', shareUrl: '' });
+      this.set({ flow: 'ready', view: s.savedFrom === 'library' && !retake ? 'library' : 'recorder', elapsed: 0, saveProgress: 0, lastFilePath: '', lastFileName: '', lastThumbnail: null, shareState: 'none', shareUrl: '' });
       if (retake) this.startRecording();
       else this.toast('Recording moved to the Trash.');
     }
@@ -951,6 +952,7 @@
         fileName: en.name,
         description: en.description || '',
         dur: en.durationSeconds != null ? this._fmtDur(en.durationSeconds) : '…',
+        seconds: en.durationSeconds != null ? en.durationSeconds : 0,
         when: this._friendlyDate(en.mtimeMs),
         size: this._formatBytes(en.sizeBytes),
         src: en.name.toLowerCase().endsWith('.webm') ? 'WebM' : 'MP4',
@@ -962,13 +964,70 @@
       const recs = this.get().recordings || [];
       this.set({
         recordings: recs.map((r) => r.path === meta.path
-          ? { ...r, thumbnail: meta.thumbnailDataUrl || r.thumbnail, dur: meta.durationSeconds != null ? this._fmtDur(meta.durationSeconds) : r.dur }
+          ? { ...r, thumbnail: meta.thumbnailDataUrl || r.thumbnail, dur: meta.durationSeconds != null ? this._fmtDur(meta.durationSeconds) : r.dur, seconds: meta.durationSeconds != null ? meta.durationSeconds : r.seconds }
           : r),
       });
     }
 
+    // Overview: open the sheet for a recording (play, trim, files for agents,
+    // Dropbox link, Trash), the same one a new recording ends on.
     openRecording(rec) {
-      if (rec && rec.path) api.libraryOpen(rec.path);
+      if (!rec || !rec.path) return;
+      const filePath = rec.path;
+      this.set({
+        flow: 'saved', savedFrom: 'library', saveProgress: 100,
+        lastFilePath: filePath, lastFileName: rec.fileName, lastThumbnail: rec.thumbnail || null,
+        lastDuration: Math.round(rec.seconds || 0), lastTitle: rec.title !== rec.fileName.replace(/\.(mp4|webm)$/i, '') ? rec.title : '',
+        lastDescription: rec.description || '',
+        shareState: 'none', shareUrl: '', shareProgress: 0,
+        agentFor: filePath, agentState: 'checking', agentSummaryPath: '', agentTranscript: '',
+      });
+      api.agentStatusFor(filePath).then((status) => {
+        const s = this.get();
+        // A build that started meanwhile reports for itself.
+        if (!status || s.lastFilePath !== filePath || s.agentState !== 'checking') return;
+        this._onAgentStatus(status);
+      }).catch(() => {
+        if (this.get().lastFilePath === filePath && this.get().agentState === 'checking') this.set({ agentState: 'none' });
+      });
+    }
+
+    // Saved sheet: make the transcript and key frames for this recording.
+    prepareAgentFiles() {
+      const p = this.get().lastFilePath;
+      if (!p) return;
+      this.set({ agentFor: p, agentState: 'working' });
+      api.agentEnsure(p);
+    }
+
+    // Saved sheet: upload this recording and get a Dropbox link.
+    shareNow() {
+      const p = this.get().lastFilePath;
+      if (p) this._share(p);
+    }
+
+    // Saved sheet: keep only the part between `start` and `end` (seconds).
+    // Returns whether it worked.
+    async trimLast(start, end) {
+      const filePath = this.get().lastFilePath;
+      if (!filePath) return false;
+      this.set({ trimBusy: true, trimProgress: 0 });
+      try {
+        const result = await api.libraryTrim({ filePath, start, end });
+        if (this.get().lastFilePath === filePath) {
+          this.set({ lastDuration: Math.round(result.durationSeconds), shareState: 'none', shareUrl: '', shareProgress: 0 });
+          const meta = await api.libraryMeta(filePath).catch(() => null);
+          if (meta && this.get().lastFilePath === filePath) this.set({ lastThumbnail: meta.thumbnailDataUrl || null });
+        }
+        this.toast('Trimmed. The original is in the Trash.');
+        if (this.get().recordings) this.loadLibrary();
+        return true;
+      } catch (err) {
+        this.toast(`Could not trim the recording: ${reason(err)}`, 'error');
+        return false;
+      } finally {
+        this.set({ trimBusy: false, trimProgress: 0 });
+      }
     }
 
     async chooseFolder() {

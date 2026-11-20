@@ -14,6 +14,7 @@ const DropboxShare = require('./dropbox-share');
 const { RecordingControls } = require('./tray-controls');
 const { CameraBubble } = require('./camera-bubble');
 const AgentFiles = require('./agent-files');
+const videoTrim = require('./video-trim');
 const { SpeechModel } = require('./model-download');
 
 let mainWindow;
@@ -345,15 +346,49 @@ ipcMain.handle('library:open', (event, filePath) => {
 // Move a recording to the Trash, with the files made for agents. Only video
 // files directly inside the recordings folder qualify.
 ipcMain.handle('library:trash', async (event, filePath) => {
+  const target = libraryTarget(filePath);
+  await shell.trashItem(target);
+  try { await shell.trashItem(agentFiles.dirFor(target)); } catch { /* no agent files for this one */ }
+  try { await shell.trashItem(agentFiles.notesPathFor(target)); } catch { /* no title saved */ }
+  return true;
+});
+
+// A recording the library may change: a video file directly inside the
+// recordings folder.
+function libraryTarget(filePath) {
   const folder = path.resolve(settingsStore.get().folder);
   const target = typeof filePath === 'string' ? path.resolve(filePath) : '';
   if (!target || path.dirname(target) !== folder || !/\.(mp4|webm)$/i.test(target) || path.basename(target).startsWith('.')) {
     throw new Error('That file is not a recording in the recordings folder.');
   }
-  await shell.trashItem(target);
-  try { await shell.trashItem(agentFiles.dirFor(target)); } catch { /* no agent files for this one */ }
-  try { await shell.trashItem(agentFiles.notesPathFor(target)); } catch { /* no title saved */ }
-  return true;
+  return target;
+}
+
+// Cut time off the start and the end of a recording. The trimmed video takes
+// the original's place and the original goes to the Trash.
+const trimsInFlight = new Set();
+ipcMain.handle('library:trim', async (event, { filePath, start, end } = {}) => {
+  const target = libraryTarget(filePath);
+  if (trimsInFlight.has(target)) throw new Error('This recording is already being trimmed.');
+  trimsInFlight.add(target);
+  try {
+    const meta = await libraryStore.metaFor(target);
+    const before = await agentFiles.read(target);
+    let length = 0;
+    await writeAtomically(target, async (partPath) => {
+      const plan = videoTrim.trimArgs({ inputPath: target, outputPath: partPath, start, end, durationSeconds: meta && meta.durationSeconds });
+      length = plan.range.length;
+      await runEncode(plan.args, length, 'trim-progress');
+      await shell.trashItem(target);
+    });
+    // The files for agents describe the old video: redo them when they
+    // existed, keeping what the app knew at record time.
+    if (before) queueAgentFiles(target, { source: before.source, microphone: before.microphone, camera: before.camera }, { force: true });
+    else queueAgentFiles(target, null);
+    return { filePath: target, durationSeconds: length };
+  } finally {
+    trimsInFlight.delete(target);
+  }
 });
 
 // Thumbnail + duration for one file (the Saved sheet shows the new recording).
@@ -430,6 +465,19 @@ ipcMain.handle('model:download', () => {
 });
 
 ipcMain.handle('model:cancel', () => { speechModel.cancel(); });
+
+// Whether the files for agents exist for a recording (opened from the overview).
+ipcMain.handle('agent:status-for', async (event, filePath) => {
+  if (typeof filePath !== 'string' || !filePath) return null;
+  const manifest = await agentFiles.read(filePath);
+  if (!manifest) return { path: filePath, state: 'none' };
+  return {
+    path: filePath, state: 'ready',
+    summaryPath: agentFiles.summaryPathFor(filePath),
+    transcript: manifest.transcript.status,
+    frames: manifest.frames.length,
+  };
+});
 
 // (Re)build the agent files for one recording, e.g. to add the transcript
 // once a model has been downloaded.
@@ -703,11 +751,8 @@ const FFMPEG_STALL_MS = 60 * 1000;
 // Re-encode a WebM recording to H.264/AAC MP4. `durationSeconds` (when known)
 // drives the progress events; the encode itself does not need it.
 function convertWebMToMP4(inputPath, outputPath, quality = 'balanced', durationSeconds = 0) {
-  return new Promise((resolve, reject) => {
-    const { preset, crf, audioBitrate } = QUALITY_PRESETS[quality] || QUALITY_PRESETS.balanced;
-    const videoDuration = Number(durationSeconds) || 0;
-
-    const ffmpegProcess = spawn(ffmpeg, [
+  const { preset, crf, audioBitrate } = QUALITY_PRESETS[quality] || QUALITY_PRESETS.balanced;
+  return runEncode([
       '-i', inputPath,
       // High profile with the level left to the encoder: it picks the one
       // that matches the frame size (Retina captures need 5.x).
@@ -730,7 +775,15 @@ function convertWebMToMP4(inputPath, outputPath, quality = 'balanced', durationS
       '-f', 'mp4',
       '-y',
       outputPath
-    ]);
+  ], durationSeconds);
+}
+
+// Run ffmpeg with `-progress pipe:1` in its arguments. `durationSeconds` (when
+// known) is the length of the output and drives the progress events on `channel`.
+function runEncode(args, durationSeconds = 0, channel = 'conversion-progress') {
+  return new Promise((resolve, reject) => {
+    const videoDuration = Number(durationSeconds) || 0;
+    const ffmpegProcess = spawn(ffmpeg, args);
     activeChildProcesses.add(ffmpegProcess);
 
     let stderr = '';
@@ -763,7 +816,7 @@ function convertWebMToMP4(inputPath, outputPath, quality = 'balanced', durationS
       const progress = Math.min(Math.max((currentTime / videoDuration) * 100, 0), 99);
       if (progress < lastProgress) return;
       lastProgress = progress;
-      safeSend(mainWindow, 'conversion-progress', {
+      safeSend(mainWindow, channel, {
         progress: Math.round(progress),
         currentTime,
         totalTime: videoDuration
@@ -788,7 +841,7 @@ function convertWebMToMP4(inputPath, outputPath, quality = 'balanced', durationS
 
     ffmpegProcess.on('close', (code) => {
       if (code === 0) {
-        safeSend(mainWindow, 'conversion-progress', {
+        safeSend(mainWindow, channel, {
           progress: 100,
           currentTime: videoDuration,
           totalTime: videoDuration

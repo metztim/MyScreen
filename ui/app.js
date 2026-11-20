@@ -32,6 +32,7 @@
     modelDl: { state: 'idle', percent: 0, detail: '' },   // speech model download
     countdownN: 3,
     elapsed: 0, lastDuration: 0,
+    savedFrom: 'record', lastTitle: '', lastDescription: '', trimBusy: false, trimProgress: 0,
     saveProgress: 0, saveEta: '',
     lastFileName: '', lastFilePath: '',
     recoverable: [],
@@ -159,6 +160,9 @@
       openLastRecording: () => c.openLastRecording(),
       dismissToast: () => toast(''),
       openRecording: (r) => c.openRecording(r),
+      prepareAgentFiles: () => c.prepareAgentFiles(),
+      shareNow: () => c.shareNow(),
+      trimLast: (start, end) => c.trimLast(start, end),
       chooseFolder: () => c.chooseFolder(),
       connectDropbox: () => c.connectDropbox(),
       disconnectDropbox: () => c.disconnectDropbox(),

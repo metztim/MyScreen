@@ -1,6 +1,6 @@
 {
   "name": "myscreen-v2",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "A clean, simple screen recorder built with Electron",
   "main": "main.js",
   "scripts": {
@@ -43,6 +43,7 @@
       "library-store.js",
       "tray-controls.js",
       "camera-bubble.js",
+      "video-trim.js",
       "camera-bubble-preload.js",
       "camera-bubble.html",
       "agent-files.js",

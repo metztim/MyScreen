@@ -1,7 +1,7 @@
 /* MyScreen — modals: source picker, permissions, recovery, saving, saved, toast */
 (function () {
   const e = React.createElement;
-  const { useState } = React;
+  const { useState, useRef, useEffect } = React;
   const Icon = window.Icon;
   const { AppIcon } = window;
 
@@ -255,7 +255,14 @@
 
   function SavedShareBox({ s, actions }) {
     const [copied, setCopied] = useState(false);
-    if (s.shareState === 'none') return null;
+    if (s.shareState === 'none') {
+      if (!s.dropbox || !s.dropbox.connected) return null;
+      return e('div', { className: 'share-box' },
+        e(Icon, { name: 'link', size: 15, style: { color: 'var(--muted)', flex: '0 0 auto' } }),
+        e('span', { className: 'url plain' }, 'Share with a Dropbox link'),
+        e('button', { className: 'share-copy', onClick: actions.shareNow }, 'Create link'),
+      );
+    }
     if (s.shareState === 'uploading') {
       return e('div', { className: 'share-box' },
         e(Icon, { name: 'link', size: 15, style: { color: 'var(--muted)', flex: '0 0 auto' } }),
@@ -282,7 +289,14 @@
   // Agent files for the recording that was just saved.
   function SavedAgentBox({ s, actions }) {
     const [copied, setCopied] = useState(false);
-    if (s.agentFor !== s.lastFilePath || s.agentState === 'off') return null;
+    if (s.agentFor !== s.lastFilePath || s.agentState === 'off' || s.agentState === 'checking') return null;
+    if (s.agentState === 'none') {
+      return e('div', { className: 'share-box' },
+        e(Icon, { name: 'sparkle', size: 15, style: { color: 'var(--muted)', flex: '0 0 auto' } }),
+        e('span', { className: 'url plain' }, 'Not prepared for agents yet'),
+        e('button', { className: 'share-copy', title: 'Makes a transcript and key frames a coding agent can read.', onClick: actions.prepareAgentFiles }, 'Prepare for agent'),
+      );
+    }
     if (s.agentState === 'working') {
       return e('div', { className: 'share-box' },
         e(Icon, { name: 'sparkle', size: 15, style: { color: 'var(--muted)', flex: '0 0 auto' } }),
@@ -317,38 +331,175 @@
     );
   }
 
+  const fileUrl = (p) => 'file://' + p.split('/').map(encodeURIComponent).join('/');
+  // 75.3 -> "1:15.3"
+  const clock = (t) => {
+    const tenths = Math.max(0, Math.round(t * 10));
+    const m = Math.floor(tenths / 600), rest = tenths - m * 600;
+    return m + ':' + String(Math.floor(rest / 10)).padStart(2, '0') + '.' + (rest % 10);
+  };
+  const TRIM_MIN = 0.5; // seconds that must be left
+
+  // Cut time off the start and the end: drag the two handles, or play to the
+  // spot and set a handle there.
+  function TrimEditor({ s, actions, onClose }) {
+    const videoRef = useRef(null);
+    const barRef = useRef(null);
+    const dragging = useRef(null);
+    const [src] = useState(() => fileUrl(s.lastFilePath) + '?v=' + Date.now());
+    const [dur, setDur] = useState(0);
+    const [range, setRange] = useState([0, 0]);
+    const [now, setNow] = useState(0);
+    const [playing, setPlaying] = useState(false);
+    const rangeRef = useRef(range);
+    rangeRef.current = range;
+    const busy = s.trimBusy;
+
+    const seek = (t) => { const v = videoRef.current; if (v) { v.currentTime = t; setNow(t); } };
+    const onMeta = () => {
+      const v = videoRef.current;
+      const d = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : (s.lastDuration || 0);
+      setDur(d);
+      setRange([0, d]);
+    };
+    const onTime = () => {
+      const v = videoRef.current;
+      const [a, b] = rangeRef.current;
+      if (!v.paused && v.currentTime >= b) { v.pause(); v.currentTime = a; }
+      setNow(v.currentTime);
+    };
+    const toggle = () => {
+      const v = videoRef.current;
+      if (!v || !dur || busy) return;
+      if (!v.paused) { v.pause(); return; }
+      const [a, b] = rangeRef.current;
+      if (v.currentTime < a || v.currentTime >= b - 0.05) v.currentTime = a;
+      v.play().catch(() => {});
+    };
+    const setEdge = (which, t) => {
+      const [a, b] = rangeRef.current;
+      const next = which === 'start'
+        ? [Math.max(0, Math.min(t, b - TRIM_MIN)), b]
+        : [a, Math.min(dur, Math.max(t, a + TRIM_MIN))];
+      setRange(next);
+      return which === 'start' ? next[0] : next[1];
+    };
+    const timeAt = (ev) => {
+      const r = barRef.current.getBoundingClientRect();
+      return Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)) * dur;
+    };
+    const handle = (which) => ({
+      className: 'trim-handle ' + which,
+      role: 'slider', tabIndex: 0,
+      'aria-label': which === 'start' ? 'Start of the recording' : 'End of the recording',
+      'aria-valuemin': 0, 'aria-valuemax': Math.round(dur), 'aria-valuenow': Math.round(which === 'start' ? range[0] : range[1]),
+      'aria-valuetext': clock(which === 'start' ? range[0] : range[1]),
+      style: { left: (dur ? (which === 'start' ? range[0] : range[1]) / dur * 100 : (which === 'start' ? 0 : 100)) + '%' },
+      onPointerDown: (ev) => {
+        if (busy || !dur) return;
+        ev.stopPropagation();
+        ev.currentTarget.setPointerCapture(ev.pointerId);
+        dragging.current = which;
+        if (videoRef.current) videoRef.current.pause();
+      },
+      onPointerMove: (ev) => { if (dragging.current === which) seek(setEdge(which, timeAt(ev))); },
+      onPointerUp: () => { dragging.current = null; },
+      onPointerCancel: () => { dragging.current = null; },
+      onKeyDown: (ev) => {
+        if (busy || !dur || (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight')) return;
+        ev.preventDefault();
+        const step = (ev.shiftKey ? 1 : 0.1) * (ev.key === 'ArrowLeft' ? -1 : 1);
+        seek(setEdge(which, (which === 'start' ? rangeRef.current[0] : rangeRef.current[1]) + step));
+      },
+    });
+
+    const changed = dur > 0 && (range[0] > 0.05 || dur - range[1] > 0.05);
+    const save = async () => {
+      if (videoRef.current) videoRef.current.pause();
+      if (await actions.trimLast(range[0], range[1])) onClose();
+    };
+    const pct = (t) => (dur ? t / dur * 100 : 0) + '%';
+
+    return e(React.Fragment, null,
+      e('div', { className: 'sheet-body' },
+        e('video', {
+          ref: videoRef, className: 'trim-video', src, preload: 'auto', playsInline: true,
+          onLoadedMetadata: onMeta, onTimeUpdate: onTime, onClick: toggle,
+          onPlay: () => setPlaying(true), onPause: () => setPlaying(false),
+        }),
+        e('div', { className: 'trim-bar', ref: barRef, onPointerDown: (ev) => { if (!busy && dur) seek(timeAt(ev)); } },
+          e('div', { className: 'trim-keep', style: { left: pct(range[0]), right: (dur ? (1 - range[1] / dur) * 100 : 0) + '%' } }),
+          e('div', { className: 'trim-now', style: { left: pct(now) } }),
+          e('div', handle('start')),
+          e('div', handle('end')),
+        ),
+        e('div', { className: 'trim-row' },
+          e('button', { className: 'btn btn-soft', style: { height: 34 }, disabled: busy || !dur, onClick: toggle },
+            e(Icon, { name: playing ? 'pause' : 'play', size: 14, fill: 'currentColor' }), e('span', null, playing ? 'Pause' : 'Play')),
+          e('button', { className: 'btn btn-soft', style: { height: 34 }, disabled: busy || !dur, onClick: () => setEdge('start', now), title: 'Start the recording at the playhead' }, e('span', null, 'Start here')),
+          e('button', { className: 'btn btn-soft', style: { height: 34 }, disabled: busy || !dur, onClick: () => setEdge('end', now), title: 'End the recording at the playhead' }, e('span', null, 'End here')),
+          e('div', { className: 'spacer' }),
+          e('div', { className: 'trim-times' }, dur ? clock(range[0]) + ' to ' + clock(range[1]) + ' · ' + clock(range[1] - range[0]) + ' long' : 'Loading…'),
+        ),
+        e('div', { className: 'field-note', style: { marginTop: 10 } },
+          'The trimmed recording replaces this one, and the original goes to the Trash.'
+          + (range[0] > 0.05 ? ' Cutting the start encodes the video again, which takes longer for a long recording.' : '')),
+      ),
+      e('div', { className: 'sheet-foot' },
+        e('div', { className: 'spacer' }),
+        e('button', { className: 'btn btn-soft', style: { height: 40 }, disabled: busy, onClick: onClose }, 'Cancel'),
+        e('button', { className: 'btn btn-blue', style: { height: 40 }, disabled: busy || !changed, onClick: save },
+          e(Icon, { name: 'scissors', size: 16 }), busy ? 'Trimming… ' + Math.round(s.trimProgress || 0) + '%' : 'Save trimmed'),
+      ),
+    );
+  }
+
+  // The sheet for one recording: after a save, and from the overview.
   function Saved({ s, actions }) {
+    const [trimming, setTrimming] = useState(false);
+    // Another recording, or none: leave the trim view.
+    useEffect(() => { setTrimming(false); }, [s.lastFilePath]);
     // The file on disk is the truth: a failed MP4 conversion saves a WebM.
     const savedFormat = /\.webm$/i.test(s.lastFileName || '') ? 'WebM' : 'MP4';
     // The file is being read for an upload: it stays until that is done.
     const busy = s.shareState === 'uploading';
+    const fromLibrary = s.savedFrom === 'library';
+    const name = (s.lastFileName || '').replace(/\.(mp4|webm)$/i, '');
+    const facts = savedFormat + (s.lastDuration ? ' · ' + actions.fmt(s.lastDuration) : '');
     return e('div', { className: 'scrim' },
-      e('div', { className: 'sheet sm', style: { maxWidth: 620 } },
+      e('div', { className: 'sheet sm', style: { maxWidth: trimming ? 760 : 680 } },
         e('div', { className: 'sheet-head' },
-          e('div', { style: { width: 40, height: 40, borderRadius: 10, background: 'var(--green-soft)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--green)', flex: '0 0 auto' } },
-            e(Icon, { name: 'check', size: 22, strokeWidth: 2.4 })),
-          e('div', null,
-            e('div', { className: 'h' }, 'Saved! Nice recording.'),
-            e('div', { className: 'sub' }, savedFormat + (s.lastDuration ? ' · ' + actions.fmt(s.lastDuration) : '') + ' · saved to ' + s.folder),
+          trimming
+            ? e('div', { className: 'sheet-badge' }, e(Icon, { name: 'scissors', size: 20 }))
+            : fromLibrary
+              ? e('div', { className: 'sheet-badge' }, e(Icon, { name: 'film', size: 20 }))
+              : e('div', { className: 'sheet-badge ok' }, e(Icon, { name: 'check', size: 22, strokeWidth: 2.4 })),
+          e('div', { style: { minWidth: 0 } },
+            e('div', { className: 'h' }, trimming ? 'Trim the recording' : fromLibrary ? (s.lastTitle || name) : 'Saved! Nice recording.'),
+            e('div', { className: 'sub' }, trimming ? 'Drag the handles to the part you want to keep.' : fromLibrary ? facts + ' · in ' + s.folder : facts + ' · saved to ' + s.folder),
           ),
         ),
-        e('div', { className: 'sheet-body' },
-          e('div', { className: 'save-stage' },
-            e('button', { className: 'save-thumb playable', onClick: actions.openLastRecording, title: 'Play the recording', 'aria-label': 'Play the recording' },
-              e(Thumb, { item: { thumbnail: s.lastThumbnail } }),
-              e('div', { className: 'play' }, e('div', { className: 'pc' }, e(Icon, { name: 'play', size: 20, fill: 'currentColor' }))),
+        trimming ? e(TrimEditor, { s, actions, onClose: () => setTrimming(false) }) : e(React.Fragment, null,
+          e('div', { className: 'sheet-body' },
+            e('div', { className: 'save-stage' },
+              e('button', { className: 'save-thumb playable', onClick: actions.openLastRecording, title: 'Play the recording', 'aria-label': 'Play the recording' },
+                e(Thumb, { item: { thumbnail: s.lastThumbnail } }),
+                e('div', { className: 'play' }, e('div', { className: 'pc' }, e(Icon, { name: 'play', size: 20, fill: 'currentColor' }))),
+              ),
+              e('div', { className: 'saved-name' }, s.lastFileName || ''),
+              fromLibrary && s.lastDescription ? e('div', { className: 'saved-desc' }, s.lastDescription) : null,
+              e(SavedShareBox, { s, actions }),
+              e(SavedAgentBox, { s, actions }),
             ),
-            e('div', { className: 'saved-name' }, s.lastFileName || ''),
-            e(SavedShareBox, { s, actions }),
-            e(SavedAgentBox, { s, actions }),
           ),
-        ),
-        e('div', { className: 'sheet-foot' },
-          e('button', { className: 'btn btn-soft', style: { height: 40 }, disabled: busy, onClick: () => actions.trashLast(), title: 'Move this recording to the Trash' }, e(Icon, { name: 'trash', size: 16 }), 'Trash'),
-          e('button', { className: 'btn btn-soft', style: { height: 40 }, disabled: busy, onClick: () => actions.trashLast({ retake: true }), title: 'Move this recording to the Trash and record again' }, e(Icon, { name: 'refresh', size: 16 }), 'Retake'),
-          e('div', { className: 'spacer' }),
-          e('button', { className: 'btn btn-soft', style: { height: 40 }, onClick: actions.reveal }, e(Icon, { name: 'folder', size: 16 }), 'Reveal in Finder'),
-          e('button', { className: 'btn btn-blue', style: { height: 40 }, onClick: actions.doneSaved }, 'Done'),
+          e('div', { className: 'sheet-foot' },
+            e('button', { className: 'btn btn-soft', style: { height: 40 }, disabled: busy, onClick: () => actions.trashLast(), title: 'Move this recording to the Trash' }, e(Icon, { name: 'trash', size: 16 }), 'Trash'),
+            fromLibrary ? null : e('button', { className: 'btn btn-soft', style: { height: 40 }, disabled: busy, onClick: () => actions.trashLast({ retake: true }), title: 'Move this recording to the Trash and record again' }, e(Icon, { name: 'refresh', size: 16 }), 'Retake'),
+            e('button', { className: 'btn btn-soft', style: { height: 40 }, disabled: busy, onClick: () => setTrimming(true), title: 'Cut time off the start or the end' }, e(Icon, { name: 'scissors', size: 16 }), 'Trim'),
+            e('div', { className: 'spacer' }),
+            e('button', { className: 'btn btn-soft', style: { height: 40 }, onClick: actions.reveal }, e(Icon, { name: 'folder', size: 16 }), 'Reveal in Finder'),
+            e('button', { className: 'btn btn-blue', style: { height: 40 }, onClick: actions.doneSaved }, 'Done'),
+          ),
         ),
       ),
     );

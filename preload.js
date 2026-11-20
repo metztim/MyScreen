@@ -29,6 +29,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   cameraBubbleSync: (request) => ipcRenderer.invoke('camera-bubble:sync', request),
   onCameraBubbleMoved: (callback) => replaceListener('camera-bubble:moved', (event, position) => callback(position)),
   libraryTrash: (filePath) => ipcRenderer.invoke('library:trash', filePath),
+  libraryTrim: (request) => ipcRenderer.invoke('library:trim', request),
+  onTrimProgress: (callback) => replaceListener('trim-progress', (event, progress) => callback(progress)),
   onLibraryMeta: (callback) => replaceListener('library:meta', (event, meta) => callback(meta)),
 
   // Permissions preflight.
@@ -59,6 +61,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   agentInfo: () => ipcRenderer.invoke('agent:info'),
   onAgentStatus: (callback) => replaceListener('agent:status', (event, status) => callback(status)),
   agentEnsure: (filePath) => ipcRenderer.invoke('agent:ensure', filePath),
+  agentStatusFor: (filePath) => ipcRenderer.invoke('agent:status-for', filePath),
   modelDownload: () => ipcRenderer.invoke('model:download'),
   modelCancel: () => ipcRenderer.invoke('model:cancel'),
   onModelProgress: (callback) => replaceListener('model:progress', (event, progress) => callback(progress)),

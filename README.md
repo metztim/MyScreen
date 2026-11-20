@@ -17,6 +17,7 @@ The app is signed and notarized, and needs macOS 13 or later on Apple Silicon. O
 - **Camera overlay**: rectangle or circle, in three sizes, mirrored or not. The camera shows on your real screen where it lands in the recording, and you can drag it there
 - **Microphone level** next to the microphone setting, so you can see it works before you record
 - **Trash or retake** a recording right after you stop, and delete recordings from the overview
+- **Trim** the start and end of a recording, after you stop or later from the overview
 - **Pause and resume** (paused time excluded from the recording)
 - **Instant save**: recordings land in `~/Movies/MyScreen` (configurable) as MP4 the moment you stop, with no save dialog and no conversion wait. WebM and a smaller-file option are available
 - **Share links via your own Dropbox**: connect once, and every saved recording uploads to your Dropbox with a view link copied to your clipboard
