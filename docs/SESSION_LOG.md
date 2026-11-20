@@ -1051,7 +1051,7 @@ Read the session log section above, familiarize yourself with the context, and l
 **Started / saved**: 2026-11-16T20:17:14+0700 / 2026-11-20T16:45:28+0700
 
 ### Summary
-Tim asked for a review of MyScreen (UX, reliability, features, coding-agent integration) and then for the fixes. The session wrote the November 2026 audit, implemented its five recommendations, and shipped three builds: 1.1.0 (menu bar controls, instant MP4 save, agent files and MCP server, Electron 45), 1.1.1 (on-screen camera, camera shape and size, microphone level, Trash and Retake, overview delete, agent-written titles, new icon), and 1.1.2 (recording sheet from the overview, trim). 1.1.2 is installed in Applications, signed and notarized; its source changes are not committed, and the GitHub draft release holds 1.1.1 and is unpublished.
+Tim asked for a review of MyScreen (UX, reliability, features, coding-agent integration) and then for the fixes. The session wrote the November 2026 audit, implemented its five recommendations, and shipped three builds: 1.1.0 (menu bar controls, instant MP4 save, agent files and MCP server, Electron 45), 1.1.1 (on-screen camera, camera shape and size, microphone level, Trash and Retake, overview delete, agent-written titles, new icon), and 1.1.2 (recording sheet from the overview, trim). 1.1.2 is installed in Applications, signed and notarized, and its source is on GitHub (`7a89027`). The GitHub release is a draft holding 1.1.2, unpublished until Tim has tried the app.
 
 ### Decisions
 - MP4 records H.264 inside WebM and copies the video into the MP4 on save, because recording straight to MP4 loses the file on a crash and re-encoding made saves slow.
@@ -1067,28 +1067,27 @@ Tim asked for a review of MyScreen (UX, reliability, features, coding-agent inte
 - `main.js`, `preload.js`, `recording-engine.js`, `recording-writer.js`, `ui/*` - hardening, H.264 recording, export plan, menu bar wiring (commits `3d6c18a`, `307c77f`)
 - `tray-controls.js`, `agent-files.js`, `model-download.js`, `mcp-server.js`, `scripts/build-whisper.sh` - new in 1.1.0 (`307c77f`, version bump `c794423`)
 - `camera-bubble.js`, `camera-bubble.html`, `camera-bubble-preload.js`, `ui/cam-layout.js`, `native/screen-prompt.mm`, `assets/icon.png`, `assets/src/icon.svg`, tests - 1.1.1 (`ed7eead`, pushed)
-- `video-trim.js`, `test/video-trim.test.js` - new, uncommitted: ffmpeg arguments for trim, with tests
-- `main.js`, `preload.js`, `ui/controller.js`, `ui/app.js`, `ui/modals.js`, `ui/styles.css`, `index.html` - uncommitted: `library:trim`, `agent:status-for`, the sheet from the overview, the trim editor, `file:` in `media-src`
-- `package.json`, `package-lock.json` - uncommitted: version 1.1.2, `video-trim.js` in the `files` list
-- `CLAUDE.md`, `README.md` - uncommitted: trim, the overview sheet, `describe_recording`
+- `video-trim.js`, `test/video-trim.test.js` - new in 1.1.2 (`7a89027`, pushed): ffmpeg arguments for trim, with tests
+- `main.js`, `preload.js`, `ui/controller.js`, `ui/app.js`, `ui/modals.js`, `ui/styles.css`, `index.html` - 1.1.2: `library:trim`, `agent:status-for`, the sheet from the overview, the trim editor, `file:` in `media-src`
+- `package.json`, `package-lock.json` - version 1.1.2, `video-trim.js` in the `files` list
+- `CLAUDE.md`, `README.md` - trim, the overview sheet, `describe_recording`
 
 ### Referenced
-- `https://github.com/metztim/MyScreen/releases` - draft release "MyScreen 1.1.1" (tag `v1.1.1`, asset `MyScreen-1.1.1-arm64.dmg`)
-- `dist/MyScreen-1.1.2-arm64.dmg` - the 1.1.2 build, not uploaded
+- `https://github.com/metztim/MyScreen/releases` - draft release "MyScreen 1.1.2" (tag `v1.1.2`, asset `MyScreen-1.1.2-arm64.dmg`)
 - `test/marketing-screenshots.js` and the CDP harness notes in `CLAUDE.md` - how every UI change was checked in a throwaway profile
 - `~/.Trash/MyScreen 1.0.0.app`, `MyScreen 1.1.0.app`, `MyScreen 1.1.1.app` - the replaced installs
 
 ### Tracked in Notion
-- **"MyScreen"** (Personal Projects, `24cedc77-7df2-8028-9ed0-e867a96a6f5e`, personal) - the project this work belongs to; status Paused. Proposed changes to it and its tasks were put to Tim at save time and are listed under Open items until he answers.
+- **"MyScreen"** (Personal Projects, `24cedc77-7df2-8028-9ed0-e867a96a6f5e`, personal) - the project this work belongs to; status set from Paused to In Progress
+- **"Publish the MyScreen 1.1.2 release"** (Personal Tasks, `41eedc77-7df2-8185-b816-fe8bc4e64154`, personal) - created; the remaining step of this work
+- Set to Done (Personal Tasks, personal): "Audit MyScreen and put it in motion again" (`3ededc77-7df2-8133-b83a-c61b6b48337c`), "Add transcription" (`24cedc77-7df2-806a-947f-ed0786bbe8a5`), "Create share link option" (`24cedc77-7df2-804a-99f1-f09311bb2d17`), "MyScreen: mic level indicator while recording" (`37cedc77-7df2-8156-885d-c4a526022102`), "MyScreen: recordings library - Show in Finder, Dropbox status + copy link, retroactive upload" (`37cedc77-7df2-8199-9b0b-fcafc3b5378a`)
 
 ### Open items
-- [ ] Commit the 1.1.2 source changes on `main`, then push on Tim's go
-- [ ] Update the draft release from 1.1.1 to 1.1.2 (file, tag, notes with trim and the overview sheet) and publish on Tim's go
+- [ ] Publish the draft release on Tim's go, after he has tried 1.1.2
 - [ ] Tim: one real recording per mode with 1.1.2 (full screen and one window, camera on), and a trim of a real recording; WebM trim was checked only at the ffmpeg-settings level
-- [ ] Notion: close the tasks this session finished (audit, transcription, share link, microphone level, library enhancements), set the project Active, and add a task for publishing the release, once Tim answers
 - [ ] Agents only write titles once the MCP server is connected (command in the app's Agent access settings); not run by this session
 
 ### Continuation prompt
-Read `docs/SESSION_LOG.md`, section "## Session Log: 2026-11-20 - audit-to-1-1-2-camera-trim-agents" (Session ID fe3368a2-0214-4545-be87-763dc7fb59b7). Context: MyScreen 1.1.2 is installed locally with trim and the overview sheet, but its source is uncommitted and the GitHub draft release still holds 1.1.1. Continue with: commit and push the 1.1.2 changes on Tim's go, then move the draft release to 1.1.2 and publish when he says so. Paths: `video-trim.js`, `ui/modals.js`, `main.js`.
+Read `docs/SESSION_LOG.md`, section "## Session Log: 2026-11-20 - audit-to-1-1-2-camera-trim-agents" (Session ID fe3368a2-0214-4545-be87-763dc7fb59b7). Context: MyScreen 1.1.2 is installed locally and pushed, and the GitHub release is an unpublished draft holding 1.1.2. Continue with: publish the draft when Tim says so, after his real recordings and a trim check out. Paths: `video-trim.js`, `ui/modals.js`, `main.js`.
 
 <!-- END_OF_SESSION_LOG -->
