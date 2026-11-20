@@ -1041,4 +1041,54 @@ Referenced paths:
 
 Read the session log section above, familiarize yourself with the context, and let me know when ready to continue.
 
+---
+
+## Session Log: 2026-11-20 - audit-to-1-1-2-camera-trim-agents
+
+**Project**: MyScreen (`/Users/timmetz/Developer/Projects/Personal/MyScreen`)
+**Session ID**: fe3368a2-0214-4545-be87-763dc7fb59b7
+**Account**: personal
+**Started / saved**: 2026-11-16T20:17:14+0700 / 2026-11-20T16:45:28+0700
+
+### Summary
+Tim asked for a review of MyScreen (UX, reliability, features, coding-agent integration) and then for the fixes. The session wrote the November 2026 audit, implemented its five recommendations, and shipped three builds: 1.1.0 (menu bar controls, instant MP4 save, agent files and MCP server, Electron 45), 1.1.1 (on-screen camera, camera shape and size, microphone level, Trash and Retake, overview delete, agent-written titles, new icon), and 1.1.2 (recording sheet from the overview, trim). 1.1.2 is installed in Applications, signed and notarized; its source changes are not committed, and the GitHub draft release holds 1.1.1 and is unpublished.
+
+### Decisions
+- MP4 records H.264 inside WebM and copies the video into the MP4 on save, because recording straight to MP4 loses the file on a crash and re-encoding made saves slow.
+- The camera in a full-screen recording is the floating window itself (captured with the screen); in a window recording the engine composites it and the floating window only marks the spot, because a window capture excludes other windows.
+- The floating camera is dragged through pointer events over IPC, not `-webkit-app-region`, because the window is non-focusable.
+- Titles and descriptions are written by the user's coding agent through the MCP tool `describe_recording` and stored in `.myscreen/<name>.notes.json`; the app itself calls no model.
+- Trim replaces the recording and moves the original to the Trash. An end-only cut copies the streams; a start cut re-encodes, because a copied video can only begin on a keyframe.
+- Clicking a recording in the overview opens the Saved sheet instead of the video; Retake shows only after a new recording.
+- The GitHub release stays a draft until Tim says to publish.
+
+### Files changed
+- `docs/AUDIT_2026-11-16.md` - the audit (committed in `3d6c18a`)
+- `main.js`, `preload.js`, `recording-engine.js`, `recording-writer.js`, `ui/*` - hardening, H.264 recording, export plan, menu bar wiring (commits `3d6c18a`, `307c77f`)
+- `tray-controls.js`, `agent-files.js`, `model-download.js`, `mcp-server.js`, `scripts/build-whisper.sh` - new in 1.1.0 (`307c77f`, version bump `c794423`)
+- `camera-bubble.js`, `camera-bubble.html`, `camera-bubble-preload.js`, `ui/cam-layout.js`, `native/screen-prompt.mm`, `assets/icon.png`, `assets/src/icon.svg`, tests - 1.1.1 (`ed7eead`, pushed)
+- `video-trim.js`, `test/video-trim.test.js` - new, uncommitted: ffmpeg arguments for trim, with tests
+- `main.js`, `preload.js`, `ui/controller.js`, `ui/app.js`, `ui/modals.js`, `ui/styles.css`, `index.html` - uncommitted: `library:trim`, `agent:status-for`, the sheet from the overview, the trim editor, `file:` in `media-src`
+- `package.json`, `package-lock.json` - uncommitted: version 1.1.2, `video-trim.js` in the `files` list
+- `CLAUDE.md`, `README.md` - uncommitted: trim, the overview sheet, `describe_recording`
+
+### Referenced
+- `https://github.com/metztim/MyScreen/releases` - draft release "MyScreen 1.1.1" (tag `v1.1.1`, asset `MyScreen-1.1.1-arm64.dmg`)
+- `dist/MyScreen-1.1.2-arm64.dmg` - the 1.1.2 build, not uploaded
+- `test/marketing-screenshots.js` and the CDP harness notes in `CLAUDE.md` - how every UI change was checked in a throwaway profile
+- `~/.Trash/MyScreen 1.0.0.app`, `MyScreen 1.1.0.app`, `MyScreen 1.1.1.app` - the replaced installs
+
+### Tracked in Notion
+- **"MyScreen"** (Personal Projects, `24cedc77-7df2-8028-9ed0-e867a96a6f5e`, personal) - the project this work belongs to; status Paused. Proposed changes to it and its tasks were put to Tim at save time and are listed under Open items until he answers.
+
+### Open items
+- [ ] Commit the 1.1.2 source changes on `main`, then push on Tim's go
+- [ ] Update the draft release from 1.1.1 to 1.1.2 (file, tag, notes with trim and the overview sheet) and publish on Tim's go
+- [ ] Tim: one real recording per mode with 1.1.2 (full screen and one window, camera on), and a trim of a real recording; WebM trim was checked only at the ffmpeg-settings level
+- [ ] Notion: close the tasks this session finished (audit, transcription, share link, microphone level, library enhancements), set the project Active, and add a task for publishing the release, once Tim answers
+- [ ] Agents only write titles once the MCP server is connected (command in the app's Agent access settings); not run by this session
+
+### Continuation prompt
+Read `docs/SESSION_LOG.md`, section "## Session Log: 2026-11-20 - audit-to-1-1-2-camera-trim-agents" (Session ID fe3368a2-0214-4545-be87-763dc7fb59b7). Context: MyScreen 1.1.2 is installed locally with trim and the overview sheet, but its source is uncommitted and the GitHub draft release still holds 1.1.1. Continue with: commit and push the 1.1.2 changes on Tim's go, then move the draft release to 1.1.2 and publish when he says so. Paths: `video-trim.js`, `ui/modals.js`, `main.js`.
+
 <!-- END_OF_SESSION_LOG -->
